@@ -1,0 +1,6 @@
+av>=14
+numpy>=2
+PySide6-Essentials>=6.7
+
+# 工作区根的素材生成工具 make_pet_webm.py 也要用：
+pillow>=10
