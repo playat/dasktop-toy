@@ -4,13 +4,22 @@
 
 ```
 dsh-pet/
-├── make_pet_webm.py             素材生成工具（一条命令，单遍管线）
-├── prompts/                     AI 生成提示词配方（106 个动作的契约）
-├── video/
-│   ├── watermark_mask_v5.mkv    水印遮罩（1280×720）
-│   └── webm/                    成品输出目录
-└── pet_py/                      桌宠运行时（PySide6 + PyAV，零 Electron）
-    └── assets/webm/             运行时读取的素材
+├── .venv/                      工作区统一虚拟环境（运行 + 素材工具共用）
+├── requirements.txt
+├── setup-pet.cmd               建 venv + 装依赖
+├── run-pet.cmd                 启动桌宠
+│
+├── main.py                     运行时入口
+├── window.py player.py video.py config.py physics.py menu.py tray.py
+├── config.jsonc                配置（JSONC，带注释）
+├── assets/webm/                运行时读取的素材（106 个）
+│
+├── make_pet_webm.py            素材生成工具（一条命令，单遍管线）
+├── make-webm.cmd               拖文件夹就能跑
+├── prompts/                    AI 生成提示词配方（106 个动作的契约）
+└── video/
+    ├── watermark_mask_v5.mkv   水印遮罩（1280×720）
+    └── webm/                   成品输出目录
 ```
 
 数据流是一条直线：
@@ -19,10 +28,10 @@ dsh-pet/
 prompts/  →  AI 生成  →  video/*.mp4  →  make_pet_webm.py  →  video/webm/*.webm
                                                                     │ --deploy
                                                                     ▼
-                                                        pet_py/assets/webm/*.webm
+                                                             assets/webm/*.webm
                                                                     │
                                                                     ▼
-                                                             pet_py/run-pet.cmd
+                                                              run-pet.cmd
 ```
 
 ---
@@ -30,8 +39,16 @@ prompts/  →  AI 生成  →  video/*.mp4  →  make_pet_webm.py  →  video/we
 ## 1. 跑起来
 
 ```bat
-pet_py\setup-pet.cmd     :: 首次：建 .venv + 装依赖（PySide6 / av / numpy / pillow）
-pet_py\run-pet.cmd       :: 启动桌宠
+setup-pet.cmd     :: 首次：建 .venv + 装依赖（PySide6 / av / numpy / pillow）
+run-pet.cmd       :: 启动桌宠
+```
+
+手动激活环境（想跑别的脚本时）：
+
+```bash
+source .venv/Scripts/activate      # Git Bash
+.venv\Scripts\activate.bat         # cmd
+.venv\Scripts\Activate.ps1         # PowerShell
 ```
 
 - 右键宠物：动作点播、大小、固定原地、回到初始位置、重载、再来一只、退出
@@ -39,12 +56,12 @@ pet_py\run-pet.cmd       :: 启动桌宠
 - 托盘图标：显示/隐藏、加一只、全部回位、重载、退出
 - 终端里 `Ctrl+C` 退出
 
-配置在 `pet_py/config.jsonc`（JSONC，带注释），改完右键「重载配置」即可，不用重启。
+配置在 `config.jsonc`（JSONC，带注释），改完右键「重载配置」即可，不用重启。
 
 ## 2. 生成素材
 
 ```bat
-pet_py\.venv\Scripts\python.exe make_pet_webm.py --src D:\ai视频 --deploy
+.venv\Scripts\python.exe make_pet_webm.py --src D:\ai视频 --deploy
 ```
 
 嫌命令长就把文件夹**直接拖到 `make-webm.cmd` 上**，效果一样。
@@ -53,7 +70,7 @@ pet_py\.venv\Scripts\python.exe make_pet_webm.py --src D:\ai视频 --deploy
 | --- | --- |
 | `--src` | AI 视频目录（mp4 / mov / webm / mkv） |
 | `--out` | 输出目录，默认 `video/webm` |
-| `--deploy` | 顺手同步到 `pet_py/assets/webm`，运行时直接能播 |
+| `--deploy` | 顺手同步到 `assets/webm`，运行时直接能播 |
 | `--mask` | 水印遮罩，默认 `video/watermark_mask_v5.mkv`（必须和源视频同分辨率） |
 | `--no-watermark` | 素材本身没水印时跳过 |
 | `--jobs` | 并行进程数，默认 4 |
@@ -72,7 +89,7 @@ pet_py\.venv\Scripts\python.exe make_pet_webm.py --src D:\ai视频 --deploy
 
 1. 用 `prompts/桌面宠物 10 秒动作提示词.md` 里的配方生成绿幕视频 —— **「通用前缀」那一段不能改**，绿幕纯色、角色居中、双脚锚定、首尾是标准站立，全靠它保证下游能对齐
 2. 全部丢进一个目录，跑上面的命令
-3. 在 `pet_py/config.jsonc` 的 `animations` 里把动画名填进对应池子：
+3. 在 `config.jsonc` 的 `animations` 里把动画名填进对应池子：
    - `idle` / `turn` / `move` / `drag` / `clicks` / `actions`（动作点播的三级菜单）
    - 最小可跑：`idle` 一个就够；体验完整建议 idle + drag + turn + clicks + moves 约 6 个
 4. 右键「重载配置」
@@ -81,8 +98,8 @@ pet_py\.venv\Scripts\python.exe make_pet_webm.py --src D:\ai视频 --deploy
 
 ## 依赖
 
-- Python 3.10+
-- `pet_py/requirements.txt`：PySide6-Essentials / av / numpy / pillow
+- Python 3.10~3.13（3.14 上 PySide6 轮子不一定齐，`setup-pet.cmd` 会优先用 PATH 里的 `python`）
+- `requirements.txt`：PySide6-Essentials / av / numpy / pillow
 - 素材编码：PyAV 自带的 libvpx-vp9，**不需要外部 ffmpeg**
 
 `LICENSE` 为上游客体项目（dsh-pet）的 MIT 许可，`prompts/` 与素材源自该项目。

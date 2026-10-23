@@ -20,12 +20,12 @@
   4. 转码（encode_thumbs）
      libvpx-vp9 / yuva420p / CRF 40 / 24fps，直接出插件播放的 640×360。
 
-依赖：av（PyAV）、numpy、Pillow —— 都是 pet_py/.venv 里现成的，**不需要装 ffmpeg**。
+依赖：av（PyAV）、numpy、Pillow —— 都用工作区的 .venv，**不需要装 ffmpeg**。
 
 用法（在工作区根目录跑）：
-    pet_py\\.venv\\Scripts\\python.exe make_pet_webm.py --src D:\\ai视频
+    .venv\\Scripts\\python.exe make_pet_webm.py --src D:\\ai视频
     # 默认输出到 video/webm，文件名 = 源文件名（= 动画名）
-    # --deploy 顺手同步到 pet_py/assets/webm（运行时直接能播）
+    # --deploy 顺手同步到 assets/webm（运行时直接能播）
     # --out 换目录；--mask 换水印遮罩；--no-watermark 跳过去水印；--jobs 4 并行
 
 素材要求（跟提示词里的「通用前缀」对应）：纯绿幕、16:9、角色全程居中、首尾是标准站立。
@@ -46,13 +46,13 @@ try:
     from PIL import Image
 except ModuleNotFoundError as exc:  # 用对解释器就不该走到这
     sys.stderr.write(
-        f"\n[错误] 缺少依赖 {exc.name}。用 pet_py 自带的虚拟环境跑：\n"
-        "    pet_py\\.venv\\Scripts\\python.exe make_pet_webm.py --src <视频目录>\n\n"
+        f"\n[错误] 缺少依赖 {exc.name}。用工作区的虚拟环境跑：\n"
+        "    .venv\\Scripts\\python.exe make_pet_webm.py --src <视频目录>\n\n"
     )
     raise SystemExit(1)
 
 ROOT = Path(__file__).resolve().parent
-PETPY_WEBM = ROOT / "pet_py" / "assets" / "webm"
+RUNTIME_WEBM = ROOT / "assets" / "webm"
 
 # ---- 目标几何（与运行时常量对齐：FEET_Y_RATIO = 330/360） ----
 CANVAS_W, CANVAS_H = 640, 360
@@ -327,7 +327,7 @@ def convert_one(args: tuple[Path, Path, Path | None, int]) -> tuple[str, str]:
 def deploy(out_dir: Path) -> int:
     """把成品 webm 同步到运行时素材目录（文件名即动画 ID，不能改）。"""
     src = out_dir.resolve()
-    dst = PETPY_WEBM.resolve()
+    dst = RUNTIME_WEBM.resolve()
     if src == dst:
         return 0
     dst.mkdir(parents=True, exist_ok=True)
@@ -350,7 +350,7 @@ def main() -> int:
     ap.add_argument(
         "--deploy",
         action="store_true",
-        help="生成后同步到 pet_py/assets/webm（运行时直接读）",
+        help="生成后同步到 assets/webm（运行时直接读）",
     )
     args = ap.parse_args()
 
@@ -394,9 +394,9 @@ def main() -> int:
     print(f"\n完成 {ok}/{total} → {args.out}")
     if args.deploy:
         copied = deploy(args.out)
-        print(f"已同步 {copied} 个到 {PETPY_WEBM}")
+        print(f"已同步 {copied} 个到 {RUNTIME_WEBM}")
     else:
-        print("提示：成品在 video/webm。加 --deploy 可直接同步到 pet_py/assets/webm 给运行时用。")
+        print("提示：成品在 video/webm。加 --deploy 可直接同步到 assets/webm 给运行时用。")
     return 0 if ok == total else 1
 
 

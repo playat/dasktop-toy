@@ -2,7 +2,7 @@
 chcp 65001 >nul
 cd /d "%~dp0"
 
-rem 用 pet_py 自带的 venv
+rem 用工作区的 venv
 set PYEXE=%~dp0.venv\Scripts\python.exe
 if exist "%PYEXE%" goto run
 

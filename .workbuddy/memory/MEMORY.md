@@ -1,29 +1,35 @@
 # dsh-pet 工作区笔记
 
-## 是什么（2026-10-23 重构后）
+## 是什么（2026-10-23 两次重构后）
 
-**两个自包含部分**，已经不是 DSH 插件仓库：
+**一个平铺的工作区**（没有 `pet_py/` 这层了，用户要求环境统一在根）：
 1. **`make_pet_webm.py`** —— AI 绿幕视频 → 透明 webm 的素材工具（单遍管线，不需要 ffmpeg.exe）
-2. **`pet_py/`** —— PySide6 桌宠运行时（零 Electron / 零 Node）
+2. **根目录那 8 个 .py** —— PySide6 桌宠运行时（零 Electron / 零 Node）
 
 上游 Electron 插件（原 `dsh-pet/`，292MB）、`scripts/`、`tools/`、`docs/` 等**已按用户要求整体删除**。
-工作区没有 git，删了不可恢复。
+⚠️ **用户在 2026-10-23 17:06 自己 `git init` 并提交了两次**（106 个 webm 也一起入库了），
+此前删掉的东西不在历史里。
 
 ```
 dsh-pet/
-├── make_pet_webm.py / make-webm.cmd    素材工具（根目录，不再在 scripts/）
-├── prompts/                            106 动作生成契约（保留，「通用前缀」不可改）
-├── video/  watermark_mask_v5.mkv + webm/（默认输出）
-└── pet_py/ main/config/physics/player/video/window/menu/tray + assets/webm/ + .venv
+├── .venv/                  工作区统一环境（运行时 + 素材工具共用，唯一一份）
+├── requirements.txt
+├── setup-pet.cmd / run-pet.cmd
+├── main.py window.py player.py video.py config.py physics.py menu.py tray.py
+├── config.jsonc   assets/webm/（运行时素材 106 个）
+├── make_pet_webm.py / make-webm.cmd
+├── prompts/       video/(mask + webm/ 产物)
+└── .workbuddy/    项目记忆
 ```
 
-## 命令
+## 命令（全部在根目录）
 
 ```bat
-pet_py\setup-pet.cmd                                  :: 建 venv（腾讯云源）
-pet_py\run-pet.cmd                                    :: 启动
-pet_py\.venv\Scripts\python.exe make_pet_webm.py --src D:\AI视频 --deploy
+setup-pet.cmd                                  :: 建 .venv（腾讯云源，优先 PATH 的 python）
+run-pet.cmd                                    :: 启动
+.venv\Scripts\python.exe make_pet_webm.py --src D:\AI视频 --deploy
 ```
+
 
 `--deploy` = 成品从 `video/webm` 同步到 `pet_py/assets/webm`。
 `make_pet_webm.py` 的 `ROOT = Path(__file__).parent`（在根目录，别再加 parent）。
@@ -49,6 +55,9 @@ pet_py\.venv\Scripts\python.exe make_pet_webm.py --src D:\AI视频 --deploy
 - **`PIL.ImageGrab` 抓不到 `WS_EX_LAYERED` 窗口**。曾据此误判"没显示"，实际用户看得清楚。
   验证透明窗口只能靠 `widget.grab()` 或让用户看。
 - pip 走本机代理极慢，**装大包一律腾讯云源**（24~36MB/s）。
+- **venv 绝不能 mv 搬**：`activate` / `activate.bat` 里的 `VIRTUAL_ENV` 和 `Scripts/*.exe` launcher
+  都内嵌绝对路径，搬完全废（pip.exe 静默 rc=1）。搬过就删了重建。
+  `python.exe` 本身不受影响（靠 pyvenv.cfg 的 home），所以「能跑但进不了环境」是这个症状。
 - 非 tty 下 Python stdout 块缓冲，调试要 `-u` 或 `flush=True`。
 
 ## 运行时要点

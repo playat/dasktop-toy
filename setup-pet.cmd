@@ -5,7 +5,8 @@ setlocal
 
 if not exist ".venv\Scripts\python.exe" (
     echo [1/3] 创建 .venv ...
-    where py >nul 2>nul && (py -3 -m venv .venv) || (python -m venv .venv)
+    rem 优先用 PATH 里的 python（3.13 系列已验证有 PySide6 轮子），没有再退回 py -3
+    where python >nul 2>nul && (python -m venv .venv) || (py -3 -m venv .venv)
 )
 if not exist ".venv\Scripts\python.exe" (
     echo   [失败] 找不到可用的 Python 3，请先安装 Python 3.10+ 并加入 PATH。
@@ -22,7 +23,7 @@ if errorlevel 1 (
 )
 
 echo [3/3] 自检 ...
-".venv\Scripts\python.exe" -c "import PySide6, av, numpy; print('  PySide6', PySide6.__version__, '| av', av.__version__, '| numpy', numpy.__version__)"
+".venv\Scripts\python.exe" -c "import PySide6, av, numpy, PIL; print('  PySide6', PySide6.__version__, '| av', av.__version__, '| numpy', numpy.__version__, '| pillow', PIL.__version__)"
 if errorlevel 1 (
     echo   [失败] 导入失败。
     pause

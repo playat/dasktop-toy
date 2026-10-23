@@ -5,10 +5,10 @@ cd /d "%~dp0"
 rem 用法一：把 AI 视频文件夹拖到本文件上（默认 --deploy 会问你）
 rem 用法二：make-webm.cmd "D:\AI视频" --deploy --jobs 8
 
-set "PYEXE=pet_py\.venv\Scripts\python.exe"
+set "PYEXE=.venv\Scripts\python.exe"
 if not exist "%PYEXE%" (
     echo.
-    echo   [缺少运行环境] 先跑一次 pet_py\setup-pet.cmd
+    echo   [缺少运行环境] 先跑一次 setup-pet.cmd
     echo.
     pause
     exit /b 1
