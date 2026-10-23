@@ -18,13 +18,36 @@
 
 from __future__ import annotations
 
+import os
 import signal
 import sys
 from pathlib import Path
 from typing import Any
 
-HERE = Path(__file__).resolve().parent
+
+def _app_dir() -> Path:
+    """可写目录：打包后是 exe 所在目录，源码模式是脚本目录。
+
+    配置、素材、日志都相对这里找 —— 所以换素材/改配置不需要重新编译。
+    """
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
+HERE = _app_dir()
 sys.path.insert(0, str(HERE))
+
+# PyInstaller --windowed 没有控制台，此时 sys.stdout/stderr 是 None，
+# 而本文件到处都是 print(..., flush=True) —— 不兜住会直接 AttributeError。
+# 打包版统一写 exe 同级的 dsh-pet.log，出问题能查。
+if sys.stdout is None or sys.stderr is None:
+    try:
+        _stream = open(HERE / "dsh-pet.log", "a", encoding="utf-8", buffering=1)
+    except OSError:
+        _stream = open(os.devnull, "w", encoding="utf-8")
+    sys.stdout = sys.stdout or _stream
+    sys.stderr = sys.stderr or _stream
 
 try:
     from PySide6.QtCore import QTimer

@@ -16,6 +16,7 @@ dsh-pet/
 │
 ├── make_pet_webm.py            素材生成工具（一条命令，单遍管线）
 ├── make-webm.cmd               拖文件夹就能跑
+├── build.py / build.cmd        打包成 exe
 ├── prompts/                    AI 生成提示词配方（106 个动作的契约）
 └── video/
     ├── watermark_mask_v5.mkv   水印遮罩（1280×720）
@@ -95,6 +96,30 @@ source .venv/Scripts/activate      # Git Bash
 4. 右键「重载配置」
 
 配比看 `animationWeights`（idle / turn / move 的掷骰权重），`fixedEnabled: true` 的宠物不会自己走动。
+
+## 4. 打包成可执行文件
+
+```bat
+build.cmd                :: 目录版 dist\DshPet\DshPet.exe（推荐）
+build.cmd --onefile      :: 单文件 dist\DshPet.exe（启动慢，体积集中）
+build.cmd --console      :: 带黑窗口，能看实时日志
+build.cmd --clean        :: 先清 build/ 和 dist/ 再打
+```
+
+产物是 `dist\DshPet\`，**配置和素材摆在 exe 旁边，不塞进包里**：
+
+| 文件 | 说明 |
+| --- | --- |
+| `DshPet.exe` | 双击启动，无控制台 |
+| `_internal/` | Qt / PyAV / numpy 等运行时 |
+| `config.jsonc` | 直接改，右键「重载配置」生效 |
+| `assets/webm/` | 换素材不用重新编译 |
+| `dsh-pet.log` | 打包版没有控制台，日志写在这里 |
+
+首次构建会自动装 PyInstaller。目录版约 136MB（素材 53MB + 运行时 78MB）。
+exe 图标从待机动画首帧抠出来，`--no-icon` 可以跳过。
+
+注意：`--onefile` 每次启动都要把几十 MB 解压到临时目录，观感上会慢 2~3 秒，素材改动也得重编译 —— 日常用目录版就够了。
 
 ## 依赖
 

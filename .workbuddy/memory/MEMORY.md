@@ -71,3 +71,13 @@ run-pet.cmd                                    :: 启动
 - 每只宠物独立解码线程 + 独立 `fixedEnabled`。
 - 菜单「大小」不写回配置（重启回 462）。
 - `config.jsonc` 是从原插件整份拷来的，含大量 DSH 时代注释，只有部分字段 pet_py 会读。
+
+## 打包（build.py / build.cmd）
+
+- PyInstaller onedir → `dist/DshPet/`，136MB。`--onefile` 也可（启动慢 2~3s）。
+- **素材/配置外置**在 exe 同级，不走 `--add-data`。`main.py:_app_dir()`：
+  frozen 时 `Path(sys.executable).parent`，`HERE`/`CONFIG_FILE`/`ASSETS` 全部据此解析。
+- **`--windowed` 时 `sys.stdout is None`** → 满屏 `print` 会炸；main.py 顶部重定向到 `dsh-pet.log`。
+- **别给 PyInstaller 传 `--clean`**：它清 `%LOCALAPPDATA%\pyinstaller` 上百个文件，
+  在受限环境触发批量删除拦截，构建直接失败。清 build/dist 用 `build.py --clean`。
+- 必须 `--collect-all av`（否则 libvpx dll 缺失）；图标从素材首帧抠，必须先 `alpha[alpha<16]=0`。

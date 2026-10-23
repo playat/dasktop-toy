@@ -11,6 +11,11 @@ video/*.mkv
 # 遮罩是要用的，别被上面一行带走
 !video/watermark_mask_v5.mkv
 
+# ── 打包产物 ──
+build/
+dist/
+*.spec
+
 # ── 临时 ──
 temp/
 *.tmp
