@@ -11,10 +11,6 @@ video/*.mkv
 # 遮罩是要用的，别被上面一行带走
 !video/watermark_mask_v5.mkv
 
-# ── 成品素材（53MB 起步；想让仓库自带素材就把下面两行删掉） ──
-video/webm/
-pet_py/assets/webm/
-
 # ── 临时 ──
 temp/
 *.tmp
