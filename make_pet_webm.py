@@ -8,8 +8,11 @@
 
   1. 去水印（watermark_step01 / fill_nn）
      原理：mask 里标白的像素，用周围非水印像素的颜色填掉。
-     改动：原版用 scipy 取「第 k 近非水印像素」；这里改成在水印局部区域做逐圈膨胀内填
-     （8 邻域求已填像素均值，一圈 1px）。水印是细笔画，几圈就收敛，效果等价且不需要 scipy。
+     原版用 scipy 取「第 k 近非水印像素」；这里改成：按行段切成小块 →
+     洞先膨胀几 px → 再沿「明显偏离底色」的像素自适应长开 → 洞内做上下左右
+     最近像素的距离加权插值。纯 numpy，不需要 scipy。
+     关键点：遮罩只盖住笔画实心部分，边缘那圈半透明像素不一起挖掉就会留一圈淡字影
+     （就是「去不干净」）。也不能整帧取并集 —— 遮罩底部有整行白线，并集等于整个画面。
   2. 抠像（chroma_step02）
      只把「色相 70~170° + 饱和度 ≥0.15 + 明度 ≥0.15」判为背景 → alpha 0，色相两端 6° 羽化。
      刻意不用 chromakey 的 YUV 距离：蓝色/白色角色会被误抠。
@@ -42,9 +45,11 @@
 from __future__ import annotations
 
 import argparse
+import shutil
 import sys
+import threading
 import time
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 try:
@@ -89,82 +94,174 @@ MIN_WEBM_BYTES = 512  # 小于这个数当作空文件/残片（正常成品都�
 
 
 class MaskFiller:
-    """水印遮罩：每帧裁到「该帧白像素的紧包围盒」，只在那块区域做膨胀内填。
+    """水印遮罩：每帧把白像素切块，逐块外扩后做「4 向插值」填充。
 
-    早先版本取「所有帧的并集」再统一裁，遇到遮罩底部有条整行白线就把整幅 1280×711
-    都当成水印区——每个视频白算 90 秒，还平白去动大半张图。改成逐帧紧裁即可。
+    两个关键点（都是实测踩出来的）：
+
+    1. **洞要先膨胀再填**。遮罩只盖住笔画的实心部分，抗锯齿边缘那 1~3px 半透明像素
+       落在遮罩外；不一起挖掉的话，填完会留下一圈淡淡的字影 —— 看着就是「去不干净」。
+    2. **必须分块，不能取整帧并集**。遮罩底部常有一条整行白线（水印条），
+       它和顶部文字差了几百行，并集 box 就是整个画面：既按 1280×720 算 N 圈（260s/视频），
+       又只能从相邻像素一圈圈往里渗，把边缘的脏色一起拖进洞中央。
+
+    现在按「连续有白像素的行段」切块，每块裁一个刚好带 pad 的小图，
+    用上下左右最近的非洞像素做距离加权插值（等价于 scipy 的最近邻内填，但纯 numpy）。
     """
 
-    def __init__(self, path: Path, passes: int = 24) -> None:
-        self.passes = passes
-        pad = max(2, min(passes, 24) + 2)  # 留出已知像素环，供内填取色
-        self.crops: list[tuple[int, int, int, int, np.ndarray] | None] = []
+    def __init__(self, path: Path, grow: int = 4) -> None:
+        self.grow = max(0, grow)
+        self.fringe = 14  # 自适应补长的最大圈数（见 _grow_into_fringe）
+        self.regions: list[list[tuple[int, int, int, int, np.ndarray]]] = []
 
         cont = av.open(str(path))
         try:
             for frame in cont.decode(video=0):
                 m = frame.to_ndarray(format="gray") > 127
-                if not m.any():
-                    self.crops.append(None)
-                    continue
-                h, w = m.shape
-                ys, xs = np.where(m)
-                x0, y0 = max(0, int(xs.min()) - pad), max(0, int(ys.min()) - pad)
-                x1, y1 = min(w, int(xs.max()) + 1 + pad), min(h, int(ys.max()) + 1 + pad)
-                self.crops.append((x0, y0, x1, y1, m[y0:y1, x0:x1].copy()))
+                if m.any() and self.grow:
+                    m = _dilate(m, self.grow)
+                # pad 要留出「干净」的一圈供取色：自适应补长最多再吃 fringe 圈
+                self.regions.append(_split_regions(m, pad=self.grow + self.fringe) if m.any() else [])
         finally:
             cont.close()
 
-        if not self.crops or not any(c is not None for c in self.crops):
+        if not self.regions or not any(self.regions):
             raise RuntimeError(f"遮罩里没有白色像素：{path}")
 
-        boxes = [c[:4] for c in self.crops if c is not None]
-        bx0 = min(b[0] for b in boxes)
-        by0 = min(b[1] for b in boxes)
-        bx1 = max(b[2] for b in boxes)
-        by1 = max(b[3] for b in boxes)
-        w1 = max(c[2] - c[0] for c in boxes if c is not None)
-        h1 = max(c[3] - c[1] for c in boxes if c is not None)
+        counts = [len(r) for r in self.regions]
+        boxes = [b for regs in self.regions for b in regs]
+        big = max(boxes, key=lambda t: (t[2] - t[0]) * (t[3] - t[1]))
         print(
-            f"[mask] {path.name} 水印并集 {bx1 - bx0}x{by1 - by0} @({bx0},{by0})，"
-            f"单帧最大 {w1}x{h1}，{len(self.crops)} 帧",
+            f"[mask] {path.name} 基础外扩 {self.grow}px + 自适应 {self.fringe}px · "
+            f"每帧 {min(counts)}~{max(counts)} 块 · 最大块 {big[2] - big[0]}x{big[3] - big[1]} "
+            f"@({big[0]},{big[1]}) · {len(self.regions)} 帧",
             flush=True,
         )
 
     def apply(self, rgb: np.ndarray, index: int) -> np.ndarray:
-        if not self.crops:
+        if not self.regions:
             return rgb
-        crop = self.crops[min(index, len(self.crops) - 1)]
-        if crop is None:
-            return rgb
-        x0, y0, x1, y1, m = crop
-        sub = rgb[y0:y1, x0:x1].astype(np.float32)
-        sub = _dilate_fill(sub, m, self.passes)
-        rgb[y0:y1, x0:x1] = np.clip(sub, 0, 255).astype(np.uint8)
+        bg = _dominant_color(rgb)
+        for x0, y0, x1, y1, m in self.regions[min(index, len(self.regions) - 1)]:
+            sub = rgb[y0:y1, x0:x1]
+            hole = _grow_into_fringe(m, sub, self.fringe, bg)
+            rgb[y0:y1, x0:x1] = _fill_4dir(sub, hole)
         return rgb
 
 
-def _dilate_fill(img: np.ndarray, hole: np.ndarray, passes: int) -> np.ndarray:
-    """洞内逐圈用 8 邻域已填像素的均值填充（等价于「从最近的外圈取色」）。"""
+def _dominant_color(rgb: np.ndarray) -> np.ndarray:
+    """整帧主色 —— 绿幕视频里就是背景色。隔 8 取样取中位数，角色占不到一半所以稳。"""
+    return np.median(rgb[::8, ::8].reshape(-1, 3).astype(np.float32), axis=0)
+
+
+def _dilate(mask: np.ndarray, r: int) -> np.ndarray:
+    """4 邻域膨胀 r 圈，用来吃掉水印边缘的抗锯齿残影。"""
+    out = mask
+    for _ in range(r):
+        p = np.pad(out, 1, mode="constant", constant_values=False)
+        out = p[1:-1, 1:-1] | p[:-2, 1:-1] | p[2:, 1:-1] | p[1:-1, :-2] | p[1:-1, 2:]
+    return out
+
+
+def _split_regions(
+    mask: np.ndarray, pad: int, gap: int = 4
+) -> list[tuple[int, int, int, int, np.ndarray]]:
+    """按「连续有白像素的行段」切块（行间隔 > gap 就断开），每块裁一个带 pad 的 box。
+
+    顶部文字 + 底部整行白线会被切成两块，各自只算自己那一小片 —— 这就是旧版
+    整帧并集慢 260s 的根因。
+    """
+    h, w = mask.shape
+    rows = np.nonzero(mask.any(axis=1))[0]
+    if rows.size == 0:
+        return []
+
+    runs: list[tuple[int, int]] = []
+    start = prev = int(rows[0])
+    for r in rows[1:]:
+        r = int(r)
+        if r - prev > gap:
+            runs.append((start, prev))
+            start = r
+        prev = r
+    runs.append((start, prev))
+
+    out = []
+    for y0, y1 in runs:
+        cols = np.nonzero(mask[y0: y1 + 1].any(axis=0))[0]
+        x0, x1 = int(cols[0]), int(cols[-1])
+        X0, Y0 = max(0, x0 - pad), max(0, y0 - pad)
+        X1, Y1 = min(w, x1 + 1 + pad), min(h, y1 + 1 + pad)
+        out.append((X0, Y0, X1, Y1, mask[Y0:Y1, X0:X1].copy()))
+    return out
+
+
+def _grow_into_fringe(
+    hole: np.ndarray, rgb: np.ndarray, rounds: int, bg: np.ndarray, thresh: float = 12.0
+) -> np.ndarray:
+    """把洞沿着「明显偏离底色」的像素继续长开，吃掉水印的半透明发光边。
+
+    遮罩是二值的，只盖住笔画实心部分；边缘那圈半透明像素颜色偏离底色却没被标进来。
+    固定外扩治不了：扩少了留一圈淡字影，扩多了会把旁边的角色吃掉。
+    这里让它自己长——只往「颜色还不是底色」的像素里长，颜色回到底色就停。
+
+    bg 必须是**整帧主色**而不是裁剪框边缘的中位数：水印常贴着画面底部，
+    框边会框到角色，底色估歪了就会把整条角色腿当成水印象素一路吃掉（实测过）。
+    """
+    if rounds <= 0 or hole.all():
+        return hole
+    cand = np.abs(rgb.astype(np.float32) - bg).sum(axis=2) > thresh
+
+    out = hole
+    for _ in range(rounds):
+        p = np.pad(out, 1, mode="constant", constant_values=False)
+        near = p[1:-1, 1:-1] | p[:-2, 1:-1] | p[2:, 1:-1] | p[1:-1, :-2] | p[1:-1, 2:]
+        grown = near & cand & ~out
+        if not grown.any():
+            break
+        out = out | grown
+    return out
+
+
+def _fill_4dir(img: np.ndarray, hole: np.ndarray) -> np.ndarray:
+    """洞内每个像素取「上下左右最近的非洞像素」做距离加权平均。
+
+    比逐圈膨胀好在两点：
+    - 洞中央不会出现方向性拖影（膨胀是从四个边同时往里渗，中线会有接缝）；
+    - 取色点离洞足够远（洞已膨胀过），不会把水印边缘的残色带进来。
+    纯 numpy 的四向 accumulate，一次算完，跟洞的厚度无关。
+    """
+    h, w = hole.shape
     known = ~hole
-    todo = hole.copy()
-    for _ in range(passes):
-        if not todo.any():
-            break
-        acc = np.zeros_like(img)
-        cnt = np.zeros(hole.shape, np.float32)
-        for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (-1, 1), (1, -1), (1, 1)):
-            si = np.roll(np.roll(img, dy, 0), dx, 1)
-            sk = np.roll(np.roll(known, dy, 0), dx, 1)
-            acc += si * sk[..., None]
-            cnt += sk
-        fill = todo & (cnt > 0)
-        if not fill.any():
-            break
-        img[fill] = acc[fill] / cnt[fill][:, None]
-        known |= fill
-        todo &= ~fill
-    return img
+    if not known.any() or not hole.any():
+        return img
+
+    src = img.astype(np.float32)
+    yy = np.broadcast_to(np.arange(h, dtype=np.int32)[:, None], (h, w))
+    xx = np.broadcast_to(np.arange(w, dtype=np.int32)[None, :], (h, w))
+
+    # 沿四根轴找「最近的非洞像素」坐标（没有则越界值，靠 ok 掩码剔掉）
+    top = np.maximum.accumulate(np.where(known, yy, -1), axis=0)
+    bot = np.minimum.accumulate(np.where(known, yy, h)[::-1], axis=0)[::-1]
+    left = np.maximum.accumulate(np.where(known, xx, -1), axis=1)
+    right = np.minimum.accumulate(np.where(known, xx, w)[:, ::-1], axis=1)[:, ::-1]
+
+    acc = np.zeros((h, w, 3), np.float32)
+    wsum = np.zeros((h, w), np.float32)
+    picks = (
+        (np.clip(top, 0, h - 1), xx, yy - np.clip(top, 0, h - 1), top >= 0),
+        (np.clip(bot, 0, h - 1), xx, np.clip(bot, 0, h - 1) - yy, bot < h),
+        (yy, np.clip(left, 0, w - 1), xx - np.clip(left, 0, w - 1), left >= 0),
+        (yy, np.clip(right, 0, w - 1), np.clip(right, 0, w - 1) - xx, right < w),
+    )
+    for cy, cx, dist, ok in picks:
+        wt = np.where(ok, 1.0 / (dist + 1.0), 0.0)
+        acc += src[cy, cx] * wt[..., None]
+        wsum += wt
+
+    out = src.copy()
+    fill = hole & (wsum > 0)
+    out[fill] = acc[fill] / wsum[fill][:, None]
+    return np.clip(out, 0, 255).astype(np.uint8)
 
 
 # ---------------------------------------------------------------- 抠像
@@ -330,14 +427,14 @@ def render(src: Path, dst: Path, stats: dict, filler: MaskFiller | None) -> int:
 
 def convert_one(args: tuple[Path, Path, Path | None, int]) -> tuple[str, str]:
     """src 转到 dst（dst 可能是子目录里的已有成品，原地覆盖以保住用户的目录结构）。"""
-    src, dst, mask_path, passes = args
+    src, dst, mask_path, grow = args
     t0 = time.time()
     try:
         dst.parent.mkdir(parents=True, exist_ok=True)
         # 先写临时文件再改名：中途失败不会留下一个看起来"已生成"的残片。
         # 临时文件故意不带 .webm 后缀——否则它会被「递归扫目录」当成一个成品索引进去
         tmp = dst.with_name(dst.stem + ".part")
-        filler = MaskFiller(mask_path, passes) if mask_path else None
+        filler = MaskFiller(mask_path, grow) if mask_path else None
         stats = measure_video(src, filler)
         frames = render(src, tmp, stats, filler)
         tmp.replace(dst)
@@ -431,6 +528,101 @@ def _names_brief(items: list[Path], limit: int = 6) -> str:
     return "、".join(shown) + (f" …（还有 {rest} 个）" if rest > 0 else "")
 
 
+# ---------------------------------------------------------------- 进度指示
+
+
+_SPIN = "|/-\\"
+
+
+def _mmss(seconds: float) -> str:
+    s = int(seconds)
+    return f"{s // 60:02d}:{s % 60:02d}"
+
+
+class Spinner:
+    """等视频转码时原地转圈的 loading。转码在子进程里跑，主进程只能等着。
+
+    几个约束：
+    - 只在真终端（isatty）里画。输出被重定向到文件/管道时画 \\r 会把日志搅成一行，
+      那种情况退回「每完成一个打一行」。
+    - 帧只用纯 ASCII `|/-\\`。cmd.exe 默认 cp936，盲文字符（⠋⠙⠹…）不在 GBK 里，
+      写出去会 UnicodeEncodeError，而且 .cmd 里救不回来。
+    - 画行和打结果都在同一把锁里 —— 否则子进程结果一返回就会和转圈的 `\\r` 撞在一起，
+      出现「[3/12] OK ...处理中 2/12」这种半截串行的乱码。
+    """
+
+    def __init__(self, total: int) -> None:
+        self.total = total
+        self.done = 0
+        self.failed = 0
+        self.t0 = time.time()
+        self.enabled = self._is_tty()
+        self._stop = threading.Event()
+        self._lock = threading.Lock()
+        self._thr = threading.Thread(target=self._loop, daemon=True)
+        # 清行用的空白长度：别超过终端宽度，否则擦除本身就换行了
+        try:
+            self._width = max(shutil.get_terminal_size((80, 24)).columns - 1, 40)
+        except OSError:
+            self._width = 79
+
+    @staticmethod
+    def _is_tty() -> bool:
+        try:
+            return bool(sys.stdout and sys.stdout.isatty())
+        except Exception:  # noqa: BLE001
+            return False
+
+    # ---------- 生命周期 ----------
+
+    def __enter__(self) -> "Spinner":
+        if self.enabled:
+            self._thr.start()
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self._stop.set()
+        if self.enabled:
+            self._thr.join(timeout=2)
+            with self._lock:
+                self._wipe()
+
+    # ---------- 内部 ----------
+
+    def _wipe(self) -> None:
+        sys.stdout.write("\r" + " " * self._width + "\r")
+        sys.stdout.flush()
+
+    def _loop(self) -> None:
+        i = 0
+        while not self._stop.wait(0.1):  # 0.1s 一格，看着像在转
+            i = (i + 1) % len(_SPIN)
+            self._draw(_SPIN[i])
+
+    def _draw(self, frame: str) -> None:
+        text = f" {frame} 已完成 {self.done}/{self.total} · 已用 {_mmss(time.time() - self.t0)}"
+        if self.failed:
+            text += f" · 失败 {self.failed}"
+        with self._lock:
+            sys.stdout.write("\r" + text + " " * 4)
+            sys.stdout.flush()
+
+    # ---------- 给主循环用 ----------
+
+    def report(self, idx: int, name: str, status: str) -> bool:
+        """落一条结果。返回是否成功。会先把转圈那行擦掉再正常换行输出。"""
+        ok = status.startswith("OK")
+        self.done += 1
+        if not ok:
+            self.failed += 1
+        label = name if len(name) <= 30 else name[:29] + "…"
+        with self._lock:
+            if self.enabled:
+                self._wipe()
+            print(f"[{idx}/{self.total}] {label}  {status}", flush=True)
+        return ok
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         description="AI 绿幕视频 → dsh-pet 可直接播放的透明 webm（默认增量：做过的不再做）"
@@ -446,13 +638,21 @@ def main() -> int:
     )
     ap.add_argument("--mask", type=Path, default=DEFAULT_MASK, help="水印遮罩 mkv")
     ap.add_argument("--no-watermark", action="store_true", help="跳过去水印（素材无水印时用）")
-    ap.add_argument("--passes", type=int, default=24, help="去水印内填圈数（默认 24）")
+    ap.add_argument(
+        "--grow",
+        type=int,
+        default=4,
+        help="水印遮罩的基础外扩像素（默认 4）；边缘那圈半透明部分会自动补长，一般不用调",
+    )
+    ap.add_argument("--passes", type=int, default=None, help=argparse.SUPPRESS)
     ap.add_argument("--jobs", type=int, default=4, help="并行进程数（默认 4）")
     ap.add_argument("--only", default="", help="只处理相对路径包含该子串的视频（可写目录名或文件名片段）")
     ap.add_argument("--force", action="store_true", help="已有成品也重新生成")
     # 老习惯的 --deploy：现在默认就产出到 assets/webm，收到当无事发生，别让人卡在这
     ap.add_argument("--deploy", action="store_true", help=argparse.SUPPRESS)
     args = ap.parse_args()
+    if args.passes is not None:
+        print("[提示] --passes 已经没意义了（填充改成 4 向插值），已忽略；要调边缘用 --grow", flush=True)
 
     # ---- 1. 定位源目录 ----
     using_default = args.src is None
@@ -572,26 +772,33 @@ def main() -> int:
 
     # ---- 5. 开跑 ----
     t0 = time.time()
-    jobs = [(v, dst, mask, args.passes) for v, dst in plan]
+    jobs = [(v, dst, mask, args.grow) for v, dst in plan]
     total = len(jobs)
     ok = 0
     failed: list[tuple[str, str]] = []
-    if args.jobs <= 1:
-        results = map(convert_one, jobs)
-        for i, (name, status) in enumerate(results, 1):
-            print(f"[{i}/{total}] {name}  {status}", flush=True)
-            if status.startswith("OK"):
-                ok += 1
-            else:
-                failed.append((name, status))
-    else:
-        with ProcessPoolExecutor(max_workers=args.jobs) as ex:
-            for i, (name, status) in enumerate(ex.map(convert_one, jobs), 1):
-                print(f"[{i}/{total}] {name}  {status}", flush=True)
-                if status.startswith("OK"):
+
+    with Spinner(total) as sp:
+        if args.jobs <= 1:
+            for i, (name, status) in enumerate(map(convert_one, jobs), 1):
+                if sp.report(i, name, status):
                     ok += 1
                 else:
                     failed.append((name, status))
+        else:
+            with ProcessPoolExecutor(max_workers=args.jobs) as ex:
+                # 用 submit + as_completed，谁先做完先报谁。
+                # ex.map 是按提交顺序返回的 —— 第一个视频慢的时候，后面早就做完的
+                # 也要一起干等，屏幕上看着像卡死了。
+                futs = [ex.submit(convert_one, job) for job in jobs]
+                for i, fut in enumerate(as_completed(futs), 1):
+                    try:
+                        name, status = fut.result()
+                    except Exception as exc:  # noqa: BLE001  子进程整体挂掉（不是单个视频失败）
+                        name, status = "（子进程异常）", f"FAIL {type(exc).__name__}: {exc}"
+                    if sp.report(i, name, status):
+                        ok += 1
+                    else:
+                        failed.append((name, status))
 
     # ---- 6. 汇总 ----
     print()
