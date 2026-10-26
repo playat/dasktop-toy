@@ -30,10 +30,11 @@
     .venv\\Scripts\\python.exe make_pet_webm.py
 
     # 源目录默认 video/src（原始 mp4 就放这里）
-    # 输出直接写 assets/webm —— 就是运行时读的素材目录，不用再复制/同步
+    # 输出写工程根的 assets/webm —— 那是项目文件（进 git），源码模式运行时直接读它
+    # 打完包再跑一次 build.cmd，assets/ 会被整个镜像进 dist/assets/，那一份才是分发用的产物
     # 文件名 = 源文件名（= 动画名）
     # --force   已有成品也全部重做
-    # --only 关键字 / --jobs 4 / --out / --mask / --no-watermark
+    # --only 关键字 / --jobs 4 / --out / --mask / --no-watermark / --no-sync
 
 增量规则：递归扫 assets/webm（含所有子目录）里已有的 webm，按文件名（stem）对上就跳过；
 源文件比成品新时才重做，且**写回原来那个位置**（你把成品挪进分类子目录也不会被拉回根目录）。
@@ -64,7 +65,11 @@ except ModuleNotFoundError as exc:  # 用对解释器就不该走到这
     raise SystemExit(1)
 
 ROOT = Path(__file__).resolve().parent
-RUNTIME_WEBM = ROOT / "assets" / "webm"
+# 两个目录分工明确，别混：
+#   assets/webm      项目文件（进 git）—— 生成工具写这里，源码模式运行时读这里
+#   dist/assets/webm 打包产物（不进 git）—— build.py 按 assets/ 整个镜像出来，可整包搬走
+ASSET_WEBM = ROOT / "assets" / "webm"
+DIST_WEBM = ROOT / "dist" / "assets" / "webm"
 
 # ---- 目标几何（与运行时常量对齐：FEET_Y_RATIO = 330/360） ----
 CANVAS_W, CANVAS_H = 640, 360
@@ -83,7 +88,7 @@ HEAD_FRAMES = 5
 OPAQUE_FLOOR = 10  # alpha > 10 才算身体像素
 
 DEFAULT_MASK = ROOT / "video" / "watermark_mask_v5.mkv"
-DEFAULT_OUT = RUNTIME_WEBM  # 直接产出到运行时素材目录，省掉「再复制一遍」
+DEFAULT_OUT = ASSET_WEBM  # 产出到工程素材目录（项目文件），dist 那份由 build.py 镜像
 DEFAULT_SRC = ROOT / "video" / "src"
 
 VIDEO_EXTS = (".mp4", ".mov", ".webm", ".mkv")
@@ -456,7 +461,7 @@ def convert_one(args: tuple[Path, Path, Path | None, int]) -> tuple[str, str]:
 def existing_webm(root: Path) -> dict[str, Path]:
     """递归扫输出目录树里已有的成品：文件名（stem）→ 路径。
 
-    既然成品直接住在 assets/webm，用户很可能把它拖进分类子目录；只认根目录会
+    既然成品住在 assets/webm，用户很可能把它拖进分类子目录；只认根目录会
     导致「明明生成过还再做一遍，根目录多出一份重复」。所以整棵树都算数，
     匹配顺序：层数最浅优先、同名同层按路径字典序。
     """
@@ -623,6 +628,36 @@ class Spinner:
         return ok
 
 
+def sync_to_dist(out: Path, targets: list[Path]) -> int:
+    """把刚生成的成品顺带复制到 dist/assets/webm，返回复制个数。
+
+    为什么要有这一步：dist/ 是构建产物，正常靠 `build.cmd` 从 assets/ 整个镜像出来。
+    但「宠物开着（跑的是 dist 里那份 exe）+ 又往素材里加了动作」这种情况如果不同步，
+    就得为了一个动作重跑一遍打包。所以默认顺手同步一次；它只是让产物跟上源，
+    并不是第二份源——下次 build 照样按 assets/ 重建 dist/assets。
+    """
+    if not DIST_WEBM.is_dir():
+        return 0  # 还没打过包，没这个目录就不用管
+    try:
+        base = ASSET_WEBM.resolve()
+        out.resolve().relative_to(base)
+    except (OSError, ValueError):
+        return 0  # --out 指到别处去了，跟这套目录无关
+    copied = 0
+    for dst in targets:
+        if not dst.exists():
+            continue  # 生成失败的不会留下文件（convert_one 先写 .part 再改名）
+        try:
+            rel = dst.resolve().relative_to(base)
+            to = DIST_WEBM / rel
+            to.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(dst, to)
+            copied += 1
+        except (OSError, ValueError):
+            continue  # 同步失败不影响生成结果，build 时会再对齐
+    return copied
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         description="AI 绿幕视频 → dsh-pet 可直接播放的透明 webm（默认增量：做过的不再做）"
@@ -634,7 +669,7 @@ def main() -> int:
         "成品会镜像到输出目录的同名子目录里（缺的目录自动新建）",
     )
     ap.add_argument(
-        "--out", type=Path, default=DEFAULT_OUT, help=f"输出目录（默认 {DEFAULT_OUT}，即运行时素材目录）"
+        "--out", type=Path, default=DEFAULT_OUT, help=f"输出目录（默认 {DEFAULT_OUT}，即工程素材目录）"
     )
     ap.add_argument("--mask", type=Path, default=DEFAULT_MASK, help="水印遮罩 mkv")
     ap.add_argument("--no-watermark", action="store_true", help="跳过去水印（素材无水印时用）")
@@ -648,7 +683,10 @@ def main() -> int:
     ap.add_argument("--jobs", type=int, default=4, help="并行进程数（默认 4）")
     ap.add_argument("--only", default="", help="只处理相对路径包含该子串的视频（可写目录名或文件名片段）")
     ap.add_argument("--force", action="store_true", help="已有成品也重新生成")
-    # 老习惯的 --deploy：现在默认就产出到 assets/webm，收到当无事发生，别让人卡在这
+    ap.add_argument(
+        "--no-sync", action="store_true", help="不把成品同步进 dist/assets（默认会同步，前提是那边已有素材目录）"
+    )
+    # 老习惯的 --deploy：现在默认产出到 assets/webm 并自动同步 dist，收到当无事发生，别让人卡在这
     ap.add_argument("--deploy", action="store_true", help=argparse.SUPPRESS)
     args = ap.parse_args()
     if args.passes is not None:
@@ -741,7 +779,7 @@ def main() -> int:
     tree_depth = max((len(v.relative_to(src).parts) - 1 for v in videos), default=0)
     print(line)
     print(f" 源目录   {src}" + (f"（递归 {tree_depth} 层子目录）" if tree_depth else "（无子目录）"))
-    print(f" 输出到   {out}" + ("（运行时素材目录，做完即可播）" if out.resolve() == RUNTIME_WEBM.resolve() else ""))
+    print(f" 输出到   {out}" + ("（工程素材目录 assets/，源码模式直接读）" if out.resolve() == ASSET_WEBM.resolve() else ""))
     print(f" 视频总数 {len(videos)}")
     print(f" 已生成   {len(skipped)}（跳过）")
     print(f" 待生成   {len(plan)}" + (f"（其中 {stale} 个源文件比成品新，会重做）" if stale else ""))
@@ -816,7 +854,13 @@ def main() -> int:
     print(line)
 
     if ok:
-        print("已直接写入素材目录。宠物正在运行的话，右键菜单会自动看到新动作（无需重启）。")
+        print("已写入工程素材目录 assets/webm（项目文件）。")
+        print("  跑源码（run-pet.cmd）：右键菜单会自动重扫，不用重启就能看到新动作。")
+        synced = 0 if args.no_sync else sync_to_dist(out, [d for _, d in plan])
+        if synced:
+            print(f"  顺带同步了 {synced} 个到 dist/assets/webm（打包产物那侧也能直接用）。")
+        elif not args.no_sync and out.resolve() == ASSET_WEBM.resolve():
+            print("  想更新可分发版本：跑一次 build.cmd 把 assets/ 整个镜像进 dist/。")
     return 0 if ok == total else 1
 
 

@@ -16,11 +16,13 @@
 from __future__ import annotations
 
 import random
+import threading
 import time
 from collections import deque
+from pathlib import Path
 
 from PySide6.QtCore import QPoint, QRect, Qt, QTimer
-from PySide6.QtGui import QGuiApplication, QImage, QPainter, QTransform
+from PySide6.QtGui import QCursor, QGuiApplication, QImage, QPainter, QPixmap, QTransform
 from PySide6.QtWidgets import QWidget
 
 import physics
@@ -101,6 +103,16 @@ class PetWindow(QWidget):
         self.home_provider = None
         self.peers_provider = None
 
+        # 说话气泡（由 EventDirector 挂上来；没挂就是纯动画）
+        self.bubble = None
+        # DSH 第三方占用锁：true = 不自己掷骰、不自己走（显式点播照常）
+        self.external_lock = False
+        # 点击音效 + 拖拽光标（素材在 assets/sound、assets/pic）
+        self.click_sound: Path | None = None
+        self._last_click_sound = 0.0
+        self._cursor_idle: QCursor | None = None
+        self._cursor_hold: QCursor | None = None
+
         self._recalc_geometry(width, height)
 
         self._timer = QTimer(self)
@@ -165,6 +177,55 @@ class PetWindow(QWidget):
     def start(self) -> None:
         self._roll_next(force_idle=True)
 
+    # ---------- 外部挂件（气泡 / 音效 / 光标 / 第三方占用） ----------
+
+    def attach_bubble(self, bubble) -> None:
+        """挂上说话气泡（EventDirector 建好传进来，这里只负责跟着窗口走）。"""
+        self.bubble = bubble
+        bubble.configure(
+            pet_size=self.width(),
+            family=getattr(self._cfg.font, "family", ""),
+            size=getattr(self._cfg.font, "size", 0),
+            follow=getattr(self._cfg.font, "follow_pet", True),
+        )
+
+    def set_external_lock(self, on: bool) -> None:
+        """DSH 第三方占用锁：冻结自播（不掷骰、不走位），显式点播与拖拽照常。"""
+        self.external_lock = bool(on)
+        if self.external_lock:
+            self._stop_move()
+            self._throw = None
+
+    def set_sound(self, path: Path | None) -> None:
+        self.click_sound = path
+
+    def set_cursors(self, idle: Path | None, hold: Path | None) -> None:
+        """拖拽光标（原版 assets/pic/cursor-grab(.bing).png）；文件缺就保持系统箭头。"""
+        self._cursor_idle = _cursor_from(idle)
+        self._cursor_hold = _cursor_from(hold)
+        if self._cursor_idle is not None:
+            self.setCursor(self._cursor_idle)
+
+    def _play_click_sound(self) -> None:
+        """点一下「啾」一声（100ms 内的连点只响一次，多开也不叠音）。"""
+        if self.click_sound is None or not self.click_sound.exists():
+            return
+        now = time.monotonic()
+        if now - self._last_click_sound < 0.1:
+            return
+        self._last_click_sound = now
+        path = str(self.click_sound)
+
+        def job() -> None:
+            try:
+                import winsound  # 仅 Windows；其他平台静默跳过
+
+                winsound.PlaySound(path, winsound.SND_FILENAME | winsound.SND_ASYNC)
+            except Exception:  # noqa: BLE001
+                pass
+
+        threading.Thread(target=job, name="click-sound", daemon=True).start()
+
     def _play(self, name: str, path, *, loop: bool, state: str, on_finish=None) -> bool:
         if not self._player.play(name, path, loop=loop, on_finish=on_finish):
             return False
@@ -199,6 +260,9 @@ class PetWindow(QWidget):
 
     def _roll_next(self, force_idle: bool = False) -> None:
         if self.state in ("drag", "throw"):
+            return
+        if self.external_lock:
+            # 被第三方占用：只保持当前画面，不自己开新动作（显式点播/点击回应照常走别的入口）
             return
         w = self._cfg.weights
         idle_w = max(0.0, w.get("idle", 10.0))
@@ -430,6 +494,14 @@ class PetWindow(QWidget):
         self.resize(width, height)
         self._recalc_geometry(width, height)
         self.move(int(feet_x - width / 2), int(feet_y - height * FEET_Y_RATIO))
+        if self.bubble is not None:
+            self.bubble.configure(
+                pet_size=width,
+                family=getattr(self._cfg.font, "family", ""),
+                size=getattr(self._cfg.font, "size", 0),
+                follow=getattr(self._cfg.font, "follow_pet", True),
+            )
+            self.bubble.reflow(self.geometry())
         self.update()
         print(f"[pet] 尺寸 → {width}x{height}", flush=True)
 
@@ -454,6 +526,10 @@ class PetWindow(QWidget):
     def shutdown(self) -> None:
         self._timer.stop()
         self._player.stop()
+        if self.bubble is not None:
+            self.bubble.clear()
+            self.bubble.close()
+            self.bubble = None
 
     # ---------- 绘制 ----------
 
@@ -465,6 +541,8 @@ class PetWindow(QWidget):
 
         current, previous, fade = self._player.tick()
         self._cur, self._prev, self._fade = current, previous, fade
+        if self.bubble is not None:
+            self.bubble.follow(self.geometry())
         needs = current is not None and (current is not self._last_drawn or fade < 1.0)
         # 挤压动画进行中要持续重绘
         if time.monotonic() - self._squash_t0 < SQ_DURATION_SEC:
@@ -534,6 +612,8 @@ class PetWindow(QWidget):
         self._press_global = event.globalPosition().toPoint()
         self._drag_origin = self._press_global - self.frameGeometry().topLeft()
         self._dragging = False
+        if self._cursor_hold is not None:
+            self.setCursor(self._cursor_hold)
         self._trail.clear()
         self._trail.append((time.monotonic() * 1000.0, float(self._press_global.x()), float(self._press_global.y())))
         event.accept()
@@ -576,6 +656,8 @@ class PetWindow(QWidget):
         self._dragging = False
         self._press_global = None
         self._drag_origin = None
+        if self._cursor_idle is not None:
+            self.setCursor(self._cursor_idle)
 
         if was_dragging:
             now_ms = time.monotonic() * 1000.0
@@ -591,6 +673,7 @@ class PetWindow(QWidget):
                 print(f"[anim] release → 甩出 v=({vx:.0f}, {vy:.0f})px/s", flush=True)
                 self._start_throw(vx, vy)
         else:
+            self._play_click_sound()
             picked = self._anims.click()
             if picked is not None:
                 name, path = picked
@@ -600,3 +683,17 @@ class PetWindow(QWidget):
                 self._roll_next()
         self._trail.clear()
         event.accept()
+
+
+def _cursor_from(path: Path | None) -> QCursor | None:
+    """把 png 变成光标（缩到 32px）；读不到就返回 None（保持系统箭头）。"""
+    if not path:
+        return None
+    target = Path(path)
+    if not target.exists():
+        return None
+    pix = QPixmap(str(target))
+    if pix.isNull():
+        return None
+    pix = pix.scaled(32, 32, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+    return QCursor(pix, 4, 4)

@@ -1,5 +1,9 @@
 # 桌宠工作区
 
+> **本项目是基于开源项目 [PC2005-cloud/dsh-pet](https://github.com/PC2005-cloud/dsh-pet) 重构的桌面独立版。**
+> 上游是「DSH 插件 + Electron 桌面 Helper」的形态；这里用 PySide6 + PyAV 重写成**不依赖
+> Node / Electron / DSH 也能跑**的纯 Python 桌面程序，并尽量把上游的功能补回来（对照表见第 6 节）。
+
 两件事：**把 AI 生成的绿幕视频加工成透明 webm**，以及**把这些 webm 当成桌宠跑起来**。
 
 ```
@@ -7,30 +11,58 @@ dsh-pet/
 ├── .venv/                      工作区统一虚拟环境（运行 + 素材工具共用）
 ├── requirements.txt
 ├── setup-pet.cmd               建 venv + 装依赖
-├── run-pet.cmd                 启动桌宠
+├── run-pet.cmd                 启动桌宠（源码模式）
 │
 ├── main.py                     运行时入口
 ├── window.py player.py video.py config.py physics.py menu.py tray.py
+├── bubble.py                   说话气泡（原 client/bubble.ts 的 PySide 版）
+├── events.py                   事件编排：说话/表情包/余额/工作状态/通知
+├── dsh.py                      DSH 对接（轮询 /dsh-pet-7340 契约，可选）
+├── ai.py                       本机大模型（OpenAI 兼容，可选）
+├── memes.py                    表情包池
 ├── config.jsonc                配置（JSONC，带注释）
-├── assets/webm/                素材目录（运行时直接读；生成工具也直接写这里）
 │
 ├── make_pet_webm.py            素材生成工具（一条命令，单遍管线，默认增量）
 ├── make-webm.cmd               双击就跑（不带参数 = 处理 video/src）
 ├── build.py / build.cmd        打包成 exe
 ├── prompts/                    AI 生成提示词配方（106 个动作的契约）
-└── video/
-    ├── watermark_mask_v5.mkv   水印遮罩（1280×720）
-    └── src/                    ← 原始绿幕视频放这里（mp4 / mov / webm / mkv）
+├── video/
+│   ├── watermark_mask_v5.mkv   水印遮罩（1280×720）
+│   └── src/                    ← 原始绿幕视频放这里（mp4 / mov / webm / mkv）
+│
+├── assets/                     ← 项目文件：素材的「源」，进 git，源码模式直接读
+│   ├── webm/                  动画（按目录名决定用途，见下文）
+│   ├── memes/                 表情包（27 张 png，文件名 = 配置里的键）
+│   ├── pic/                   通知图标 + 拖拽光标
+│   ├── sound/click-duck.wav   点击音效
+│   └── fonts/上首软糖体.ttf    气泡字体
+│
+└── dist/                       构建产物：一条 build 就能整个重建，可整包搬走
+    ├── DshPet.exe              跑一次 build.cmd 就有
+    ├── _internal/              Qt / PyAV / numpy 等运行时
+    ├── config.jsonc            打包时从根目录复制一份
+    └── assets/                按 assets/ 镜像出来的一份（多出来的会删掉）
 ```
 
 数据流是一条直线：
 
 ```
 prompts/  →  AI 生成  →  video/src/*.mp4  →  make_pet_webm.py  →  assets/webm/*.webm
-                                                                              │
-                                                                              ▼
-                                                                        run-pet.cmd
+                                                                         │
+                                          ┌──────────────────────────────┴────────────┐
+                                          ▼                                           ▼
+                              run-pet.cmd（读工程 assets/）          build.cmd ──► dist/（整包可搬）
 ```
+
+两个目录分工明确：
+
+- **`assets/` 是项目文件**（进 git）—— 素材的源。生成工具写这里，源码模式运行时读这里。
+- **`dist/` 是构建产物**（不进 git）—— `build.py` 打包前把 `assets/` 整个镜像一遍，
+  里面每一样东西都能从工程文件重建出来。拷给别人就能跑，自己删了也不心疼。
+
+改了代码或换了素材，跑一次 `build.cmd`，`dist/` 就变成与工程内容一致的、可直接分发的一版。
+
+数据来源只在运行时决定：**有 DSH 就连 DSH，没有就用本机模型，都没有就纯本地**（第 2 节）。
 
 ---
 
@@ -49,7 +81,8 @@ source .venv/Scripts/activate      # Git Bash
 .venv\Scripts\Activate.ps1         # PowerShell
 ```
 
-- 右键宠物：动作点播、大小、固定原地、回到初始位置、重载、再来一只、退出
+- 右键宠物：动作点播、**说话（碎碎念 / 说句话 / 表情包）**、大小、固定原地、
+  回到初始位置、重载、再来一只、退出
 - 拖拽：松手站住；**甩出去**才会飞、撞墙反弹、落地压一下
 - 托盘图标：显示/隐藏、加一只、全部回位、重载、退出
 - 终端里 `Ctrl+C` 退出
@@ -148,9 +181,110 @@ source .venv/Scripts/activate      # Git Bash
 | `待机/` `转向/` `拖拽/` | 各 1 | 待机呼吸休闲 / 东张西望 / 被鼠标拖拽悬空反馈（特殊用途） |
 
 改名、拆并、整个目录删掉都随意 —— 菜单读目录，用途也读目录，不需要改任何配置。
+除动画之外，`assets/` 里还有别的东西（打包时一并镜像进 `dist/assets/`），各有各的用途：
+
+| 目录 | 内容 | 用在哪 |
+| --- | --- | --- |
+| `memes/` | 27 张表情包 png | 右键「说话 → 表情包」、模型选图配图（第 2.2 节） |
+| `pic/` | `notify-*.png` 通知图标、`cursor-grab*.png` 拖拽光标 | 通知气泡、拖拽时的鼠标指针 |
+| `sound/` | `click-duck.wav` | 点击音效（`events.clickSoundEnabled`） |
+| `fonts/` | `上首软糖体.ttf` | 气泡字体（`font.family` 留空就用它） |
+
 （但把 `待机/` 改名成别的，待机就找不到素材了 —— 目录名本身就是语义。）
 
-## 2. 生成素材
+## 2. 说话、表情包与事件联动
+
+这几块原本都是 DSH 插件里的功能，独立版把它拆成「素材 + 数据源」两层：素材全在
+`assets/` 里，数据源有就用、没有就降级，**不会因为缺环境起不来**。
+
+### 2.1 文字气泡
+
+宠物头顶的白底圆角气泡，尾巴指着脑袋。字号默认按宠物宽度算（`宽度 × 0.0455`，462px 的宠物
+约 21px），字体用 `assets/fonts/上首软糖体.ttf`。气泡是独立分层窗口且**不吃鼠标**
+（点气泡等于点穿到下面的东西），跟着宠物走动，到点自动收。
+
+`config.jsonc` 的 `font`：`family` 留空 = 用自带字体；`size: 0` = 按宠物尺寸自动算（写数字就是固定 px）；
+`followPet` = 缩放宠物时字号跟不跟着变。
+
+### 2.2 表情包
+
+`assets/memes/` 里有 27 张随附表情包，**文件名就是 `memes` 配置里的键**。那句描述有两个用途：
+右键菜单的悬停提示，以及给模型挑图时的候选清单。
+
+```
+右键 → 说话 ┬ 碎碎念
+            ├ 说句话…
+            └ 表情包 ┬ 随机一张（共 27 张）
+                     ├ Ciallo            （比耶眨眼卖萌问候 Ciallo～…）
+                     ├ 可爱              （标准正面卖萌立绘…）
+                     └ …
+```
+
+加图：png 丢进 `assets/memes/`，在 `config.jsonc` 的 `memes` 里补一行 `"名字": "描述"`。
+**只换图不用改配置**。有模型时（DSH 或本机），碎碎念/对话会顺手让模型挑一张配上 —— 挑不出来就只说话。
+
+### 2.3 三个数据源，优先级从高到低
+
+| 数据源 | 提供什么 | 怎么启用 |
+| --- | --- | --- |
+| **DSH** | 余额、工作状态、通知、点播动画、用 DSH 配的模型说话 | 装了 DSH 且 dsh-pet 插件在跑（自动探测 `127.0.0.1:3080`） |
+| **本机模型** | 说话（碎碎念 / 对话 / 挑表情包） | `config.jsonc` 的 `ai` 填 `baseUrl` + `model`（OpenAI 兼容） |
+| **纯本地** | 只播动画，不弹文字 | 什么都不用配（默认就是这个） |
+
+启动时日志会告诉你落到了哪一档：
+
+```
+[dsh] 已连上 http://127.0.0.1:3080（DSH 桌宠插件在跑）
+[dsh] 没找到 DSH（跳过余额/工作状态/通知/DSH 说话，纯本地模式）
+```
+
+### 2.4 DSH 对接
+
+原插件把能力挂在 **DSH 自己的 Web 服务**上（`dsh web`，默认 `127.0.0.1:3080`），前缀
+`/dsh-pet-7340`，**只监听本机、没有鉴权**，所以这个独立版不需要 Node / Electron，
+直接按上游 [`openapi.yaml`](https://github.com/PC2005-cloud/dsh-pet/blob/main/openapi.yaml) 说 HTTP：
+
+| 用到的接口 | 干什么 |
+| --- | --- |
+| `GET /state?since=&timeout=` | 长轮询：余额 / 工作状态 / 通知 / 说话 / 点播动画 / 占用锁 |
+| `POST /whisper`、`POST /chat` | 用 DSH 配的模型说一句 / 对话（回复可带配图名） |
+| `POST /balance` | 立即刷新一次余额 |
+| `POST /pose/report` | 把桌面宠物的位置和朝向报给 DSH（网页端与第三方能读到） |
+
+探测顺序：`dsh.baseUrl` → 环境变量 `DSH_PET_URL` / `DSH_WEB_URL` / `DSH_URL` → 默认 3080。
+**探测不到就整块关掉**：不请求、不占线程，右键菜单顶部显示「DSH：未连接（纯本地）」。
+`dsh.enabled = false` 可以连探测都省掉。
+
+状态比对沿用上游口径：每个叶子带 `counter`，**变了才算更新**；首拉只记基线不渲染，
+所以不会一启动就把上次留下的余额动画重播一遍。收到第三方的**占用锁**时宠物冻结自播
+（不掷骰、不走位），显式点播和拖拽照常。
+
+### 2.5 事件怎么落到素材上
+
+不用配池子，按**名字**找（和上游 config.jsonc 的池子同名，仓库里的素材就是这么命名的）：
+
+| 事件 | 素材 | 气泡 |
+| --- | --- | --- |
+| 余额 0 / 20 / 40 / 60 / 80 / 100% 六档 | `余额-钱袋满溢` … `余额-分文不剩` | 按 DSH 给的形态显示额度 % / 钱包余额 / 积分 |
+| 工作状态 thinking/working/result/waiting/success/error | `工作状态-思考冒泡` … `工作状态-垂头叹气冒汗` | `workStatusTexts` 每档随机一句 + 任务名 |
+| 通知（完成 / 失败 / 被截断 / 申请权限 / 等回答） | `pic/notify-*.png` 小图标 | 标题 + 80 字以内正文 |
+| 碎碎念 | `碎碎念-擦桌 / 发呆 / 对屏碎碎念` | 模型生成的那句话 |
+
+余额百分比口径：`windows` 取三个窗口最大值，`money` 按钱包可用/额度折算，`points` 按剩余/总量折算，
+`custom` 直接用服务商给的 percent；给不出语义就只弹文字、不播档位动画。
+素材被删/改名也不会报错，那一档就跳过。
+
+### 2.6 定时器
+
+`eventsRefreshSec`：`whisper` 默认 300 秒、`balance` 默认 1800 秒。没有模型时碎碎念
+**不会真的发请求**（只保留手动触发），余额只有连上 DSH 才有意义。
+
+### 2.7 点击音效 / 拖拽光标
+
+`events.clickSoundEnabled = true` 打开点击音效（`assets/sound/click-duck.wav`，
+100ms 内连点只响一次，多开不叠音）。拖拽时换成 `pic/cursor-grab(.bing).png` 抓手光标。
+
+## 3. 生成素材
 
 最省事的用法：**把 AI 生成的绿幕视频丢进 `video/src/`，双击 `make-webm.cmd`。**
 
@@ -159,7 +293,7 @@ source .venv/Scripts/activate      # Git Bash
 ```
 ------------------------------------------------------------------
  源目录   F:\OTHER\dsh-pet\video\src（递归 2 层子目录）
- 输出到   F:\OTHER\dsh-pet\assets\webm（运行时素材目录，做完即可播）
+ 输出到   F:\OTHER\dsh-pet\assets\webm（工程素材目录 assets/，源码模式直接读）
  视频总数 12
  已生成   9（跳过）
  待生成   3
@@ -212,8 +346,9 @@ video/src/                          assets/webm/
 只有源文件比成品新时才重做。所以反复双击是安全的，只会补新加的。
 成品被手动挪到别的分类目录也照样认得出，重做时**写回它原来那个位置**，不会在镜像位置多留一份。
 
-成品**直接写进 `assets/webm`**，不用再 `--deploy` 或手动复制；宠物开着的话，下次点开右键菜单
-就能看到新动作（菜单每次都重扫目录）。
+成品**直接写进工程的 `assets/webm`**，不用再 `--deploy` 或手动复制。宠物跑的是源码的话，下次点开
+右键菜单就能看到新动作（菜单每次都重扫目录）；如果 `dist/assets` 已经存在，脚本还会顺手把新成品
+同步一份过去，省得为了一个动作重跑打包（`--no-sync` 可关）。
 
 输出文件名 = 动画名。**成品落在哪个目录才决定它怎么被播**（`待机/` `转向/` `拖拽/` `走位/` `点击回应/`，
 见上一节），所以想要自动行为正确，就在 `video/src` 里建同名子目录再放视频；直接丢在根上的
@@ -222,7 +357,8 @@ video/src/                          assets/webm/
 | 参数 | 说明 |
 | --- | --- |
 | `--src` | 换个源目录（默认 `video/src`；拖文件夹到 `.cmd` 上等价）。支持多层子目录 |
-| `--out` | 换个输出目录（默认就是 `assets/webm`，一般不用改） |
+| `--out` | 换个输出目录（默认 `assets/webm`，一般不用改） |
+| `--no-sync` | 不把成品同步进 `dist/assets`（默认会同步，前提是那边已有素材目录） |
 | `--force` | 已有成品也全部重做 |
 | `--mask` | 水印遮罩，默认 `video/watermark_mask_v5.mkv`（必须和源视频同分辨率） |
 | `--no-watermark` | 素材本身没水印时跳过 |
@@ -247,7 +383,7 @@ video/src/                          assets/webm/
 素材放在 C 盘、D 盘也都能处理，用 `--src` 指过去就行；只是**路径要带引号**，别带末尾反斜杠。
 （感觉「目录不存在」时，看脚本打印的三条排查提示。）
 
-## 3. 做一只自己的桌宠
+## 4. 做一只自己的桌宠
 
 1. 用 `prompts/桌面宠物 10 秒动作提示词.md` 里的配方生成绿幕视频 —— **「通用前缀」那一段不能改**，绿幕纯色、角色居中、双脚锚定、首尾是标准站立，全靠它保证下游能对齐
 2. 全部丢进 `video/src/`（顺手建好分类子目录，比如 `video/src/吃吃喝喝/吃饺子.mp4`），
@@ -267,30 +403,67 @@ video/src/                          assets/webm/
 配比看 `animationWeights`（待机/转向/走位三档的掷骰权重，余下的概率给随机小动作）；
 `fixedEnabled: true` 的宠物不会自己翻朝向、不会自己走动。
 
-## 4. 打包成可执行文件
+## 5. 打包成可执行文件
 
 ```bat
-build.cmd                :: 目录版 dist\DshPet\DshPet.exe（推荐）
+build.cmd                :: 目录版 dist\DshPet.exe（推荐）
 build.cmd --onefile      :: 单文件 dist\DshPet.exe（启动慢，体积集中）
 build.cmd --console      :: 带黑窗口，能看实时日志
-build.cmd --clean        :: 先清 build/ 和 dist/ 再打
+build.cmd --clean        :: 先清 build/ 和 dist/ 里的旧构建件（素材会重新镜像）
 ```
 
-产物是 `dist\DshPet\`，**配置和素材摆在 exe 旁边，不塞进包里**：
+产物**直接平铺在 `dist\` 里，没有 DshPet 那一层**，配置和素材都摆在 exe 旁边，不塞进包里：
 
 | 文件 | 说明 |
 | --- | --- |
 | `DshPet.exe` | 双击启动，无控制台 |
 | `_internal/` | Qt / PyAV / numpy 等运行时 |
 | `config.jsonc` | 直接改，右键「重载配置」生效 |
-| `assets/webm/` | 换素材不用重新编译 |
+| `assets/` | 素材全在这（webm / memes / pic / sound / fonts），换素材不用重新编译 |
 | `dsh-pet.log` | 打包版没有控制台，日志写在这里 |
 
-首次构建会自动装 PyInstaller。目录版约 136MB（素材 53MB + 运行时 78MB）。
+也就是说 **`dist\` 整个目录拷给别人就能跑** —— 它是自洽的，不依赖工程根的任何文件。
+
+打包时**素材是从工程 `assets\` 镜像过去的**，不是原地沿用：
+PyInstaller 的产物先落到 `build\pkg\`，最后只把 `DshPet.exe` + `_internal\` 搬到 `dist\` 根。
+镜像规则是「缺的/变了的拷过去，`dist\assets` 里多出来的删掉」，所以
+
+- 删了素材 → 下次打包 `dist\assets` 里也不会剩；
+- 改了素材忘了重新打包 → 下次打包会自己对齐，不会悄悄停在旧版本；
+- 只改代码 → 素材不重拷（大小和修改时间都一样就跳过），打包不会因为 60MB 素材变慢。
+
+`--clean` 不会单独删 `dist\assets`：它下一步会被 `assets\` 重新镜像，删了只是白白多拷一遍
+（真要清干净，直接删整个 `dist\`）。
+老布局的 `dist\DshPet\`（多一层目录）打包时自动收尾：里面的素材在 `assets\` 里都有就整层删掉，
+有 `assets\` 缺的文件则保留并提示，不替你删。
+
+- 桌宠开着的时候打包会提示「文件被占用」—— 先从托盘退出再重跑。
+
+首次构建会自动装 PyInstaller。目录版约 145MB（素材 64MB + 运行时 79MB）。
 exe 图标取 `assets/webm/待机/` 里第一个素材的首帧（没有待机素材就退到随机池），
 生成 `build/pet.ico` 再嵌进 exe；`--no-icon` 可以跳过。构建结束会读回 exe 校验图标是否真的嵌进去了。
 
 注意：`--onefile` 每次启动都要把几十 MB 解压到临时目录，观感上会慢 2~3 秒，素材改动也得重编译 —— 日常用目录版就够了。
+
+## 6. 和原 DSH 插件对照
+
+上游：<https://github.com/PC2005-cloud/dsh-pet>（MIT）。原形态是「DSH 插件（TS，跑在 DSH 宿主里）
++ 网页 overlay + Electron 桌面 Helper」；这里换成「PySide6 桌面程序 + 直接说上游的 HTTP 契约」。
+
+| 原功能 | 独立版 |
+| --- | --- |
+| 透明窗口 / 动画链 / 拖拽抛掷 / 落地挤压 / 多开 | 已重写（PySide6 + PyAV，零 Node / Electron） |
+| 右键动作菜单（目录即分类 + 目录说明） | 已重写；另加「说话」一块 |
+| 文字气泡（原 `client/bubble.ts`） | 已补回 —— `bubble.py` |
+| 表情包 27 张 + 模型选图 | 已补回 —— `memes.py` + `memes` 配置 |
+| 余额 / 工作状态 / 通知联动 | 已补回，数据来自 DSH；没 DSH 时只播动画 |
+| 碎碎念 / 对话 | 已补回：DSH 的模型，或本机 OpenAI 兼容接口 |
+| 点击音效 / 拖拽光标 | 已补回 |
+| 第三方占用锁（联动演出时独占宠物） | 已支持：收到锁就冻结自播 |
+| 长轮询 `/state` + counter 增量比对 | 已实现（2 秒长挂，叶子变了立刻到） |
+| 设置页（1943 行 React） | 没有 —— 直接改 `config.jsonc`，右键「重载配置」 |
+| 网页 overlay（`display: web / both`） | 没有 —— 独立版只有桌面窗口 |
+| 第三方菜单项注册（`/menu/item`） | 没有复刻 |
 
 ## 依赖
 

@@ -66,13 +66,64 @@ except ModuleNotFoundError:
     raise SystemExit(1)
 
 from config import PetConfig, PetSpec  # noqa: E402
+from events import EventDirector  # noqa: E402
 from menu import build_menu  # noqa: E402
 from player import AnimationPlayer, AnimationSet  # noqa: E402
 from tray import PetTray, icon_from_webm  # noqa: E402
 from window import FEET_Y_RATIO, PetWindow  # noqa: E402
 
-ASSETS = HERE / "assets"
+
+def _assets_dir() -> Path:
+    """素材目录：`assets/`（exe 或工程根旁边的那份）。
+
+    两种运行形态用的是同一句判断：
+      - 打包后：exe 平铺在 `dist/`，`dist/assets/` 就在旁边 → 命中第一个候选
+      - 源码模式：工程根 `assets/`（项目文件、进 git）→ 命中第一个候选
+    第二个候选只是兜底：源码模式下 `dist/assets/` 也常常有素材（打完包留下的），
+    根目录那份被清掉时不至于起不来。
+
+    判定顺序：`<app>/assets`（有 webm 才算）→ `<app>/dist/assets`（有 webm 才算）。
+    """
+    here = _app_dir()
+    candidates = [here / "assets", here / "dist" / "assets"]
+    for cand in candidates:
+        try:
+            if cand.is_dir() and next(cand.rglob("*.webm"), None) is not None:
+                return cand
+        except OSError:
+            continue
+    # 一个成品都还没有：给工程素材目录，菜单会提示「没有素材」
+    return candidates[0]
+
+
+ASSETS = _assets_dir()
 CONFIG_FILE = HERE / "config.jsonc"
+
+
+def load_font_family(assets: Path, cfg: PetConfig) -> str:
+    """把 `assets/fonts/*.ttf` 注册进 Qt，返回气泡实际该用的字体族名。
+
+    上游是网页里 `@font-face` 声明一个 CSS 名（ShangshouSoftCandy）；桌面端要走
+    QFontDatabase 注册字体文件，再问它真正的族名 —— 配置里写 CSS 名是认不到的。
+    """
+    from PySide6.QtGui import QFontDatabase
+
+    folder = assets / "fonts"
+    families: list[str] = []
+    if folder.is_dir():
+        for font_file in sorted(folder.iterdir()):
+            if font_file.suffix.lower() not in (".ttf", ".otf"):
+                continue
+            fid = QFontDatabase.addApplicationFont(str(font_file))
+            if fid >= 0:
+                families.extend(QFontDatabase.applicationFontFamilies(fid))
+    if not families:
+        return cfg.font.family or "Microsoft YaHei UI"
+    if cfg.font.family in families:
+        return cfg.font.family
+    if cfg.font.family in ("", "ShangshouSoftCandy", "candy"):
+        return families[0]
+    return cfg.font.family
 
 CANVAS_W, CANVAS_H = 640, 360
 
@@ -133,10 +184,18 @@ class PetApp:
         self.app = app
         self.area = app.primaryScreen().availableGeometry()
         self.cfg = PetConfig.load(CONFIG_FILE)
+        self.cfg.font.family = load_font_family(ASSETS, self.cfg)
         self.anims = AnimationSet(ASSETS / "webm", self.cfg)
+        self.events = EventDirector(self.cfg, ASSETS, self.anims)
+        self.events.status.connect(lambda line: print(line, flush=True))
         self.windows: list[PetWindow] = []
         self.tray: PetTray | None = None
         self._hidden = False
+
+        # 位置上报（只有连上 DSH 才有意义，events 内部自己判）
+        self._pose_timer = QTimer()
+        self._pose_timer.setInterval(2000)
+        self._pose_timer.timeout.connect(self.events.report_pose)
 
     # ---------- 装配 ----------
 
@@ -144,6 +203,8 @@ class PetApp:
         for i, spec in enumerate(self.cfg.pets):
             self.spawn(spec, slot=i)
         self._setup_tray()
+        self.events.start()
+        self._pose_timer.start()
 
     def spawn(self, spec: PetSpec | None = None, slot: int | None = None) -> PetWindow:
         spec = spec or self.cfg.pets[0]
@@ -166,9 +227,20 @@ class PetApp:
         win.move(x, y)
         win.show()
         win.start()
+        win.pet_id = spec.id
+        self.events.attach(spec.id, win)
+        self._decorate(win)
         self.windows.append(win)
         self._refresh_tray_tip()
         return win
+
+    def _decorate(self, win: PetWindow) -> None:
+        """点击音效 + 拖拽光标（素材缺就自动跳过）。"""
+        if self.cfg.events.click_sound:
+            win.set_sound(ASSETS / "sound" / "click-duck.wav")
+        win.set_cursors(
+            ASSETS / "pic" / "cursor-grab.png", ASSETS / "pic" / "cursor-grabbing.png"
+        )
 
     def _refresh_tray_tip(self) -> None:
         """托盘悬停提示：显示开了几只、都叫什么（pets[].name 的唯一用处）。"""
@@ -214,6 +286,14 @@ class PetApp:
         spawn_act = QAction("再来一只", win)
         spawn_act.triggered.connect(lambda _checked=False: self.spawn())
 
+        pet_id = getattr(win, "pet_id", None)
+        type_act = QAction(
+            "DSH：已连接" if self.events.dsh_online else "DSH：未连接（纯本地）", win
+        )
+        type_act.setEnabled(False)
+        if self.cfg.ai.ready:
+            type_act.setToolTip(f"本机模型：{self.cfg.ai.model}")
+
         menu = build_menu(
             None,
             self.anims,
@@ -225,7 +305,7 @@ class PetApp:
             on_home=win.reset_home,
             on_reload=self.reload,
             on_quit=self.quit,
-            extra=[spawn_act],
+            extra=[*self.events.menu_actions(pet_id), spawn_act, type_act],
         )
         menu.exec(global_pos)
 
@@ -248,21 +328,28 @@ class PetApp:
             print(f"[pet] 重载失败：{exc}", flush=True)
             return
 
+        self.events.stop()
         for win in self.windows:
             win.shutdown()
             win.close()
         self.windows.clear()
 
         self.cfg = cfg
+        self.cfg.font.family = load_font_family(ASSETS, cfg)
         self.anims = AnimationSet(ASSETS / "webm", cfg)
+        self.events = EventDirector(self.cfg, ASSETS, self.anims)
+        self.events.status.connect(lambda line: print(line, flush=True))
         for i, spec in enumerate(cfg.pets):
             self.spawn(spec, slot=i)
+        self.events.start()
         if self._hidden:
             for win in self.windows:
                 win.setVisible(False)
         print(f"[pet] 配置已重载 · {len(self.windows)} 只", flush=True)
 
     def quit(self) -> None:
+        self._pose_timer.stop()
+        self.events.stop()
         for win in self.windows:
             win.shutdown()
             win.close()

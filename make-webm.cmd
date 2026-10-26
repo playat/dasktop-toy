@@ -5,7 +5,7 @@ rem  which can even mangle the arguments you pass in):
 rem
 rem    1) drop your green-screen mp4 into  video\src  and double-click this file
 rem       -> converts whatever is missing, skips what already exists
-rem       -> output goes straight to  assets\webm  (no copy/sync step)
+rem       -> output goes straight to  assets\webm  (source of truth, in git)
 rem    2) drag a folder onto this file:  make-webm.cmd "D:\AI_videos"
 rem    3) flags only:                   make-webm.cmd --jobs 8
 rem
