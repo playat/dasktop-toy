@@ -5,6 +5,8 @@ __pycache__/
 .uv-cache/
 
 # ── 素材源视频（体积大，自己保管） ──
+video/src/*
+!video/src/README.txt
 video/*.mp4
 video/*.mov
 video/*.mkv

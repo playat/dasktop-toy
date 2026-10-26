@@ -167,15 +167,26 @@ class PetApp:
         win.show()
         win.start()
         self.windows.append(win)
+        self._refresh_tray_tip()
         return win
+
+    def _refresh_tray_tip(self) -> None:
+        """托盘悬停提示：显示开了几只、都叫什么（pets[].name 的唯一用处）。"""
+        if self.tray is None:
+            return
+        names = [spec.name or spec.id for spec in self.cfg.pets]
+        tip = f"dsh-pet 桌宠 · {len(self.windows)} 只"
+        if names:
+            tip += "\n" + "、".join(names)
+        self.tray.setToolTip(tip)
 
     def _setup_tray(self) -> None:
         if not QSystemTrayIcon.isSystemTrayAvailable():
             print("[tray] 系统托盘不可用，跳过", flush=True)
             return
 
-        idle_pool = self.cfg.pools.idle or []
-        icon_path = ASSETS / "webm" / f"{idle_pool[0]}.webm" if idle_pool else None
+        idle_keys = self.anims.role_keys("idle")
+        icon_path = self.anims.path_of(idle_keys[0]) if idle_keys else None
         icon = icon_from_webm(icon_path) if icon_path and icon_path.exists() else QIcon()
         if icon.isNull():
             icon = self.app.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon)
@@ -190,6 +201,7 @@ class PetApp:
             on_quit=self.quit,
         )
         self.tray.show()
+        self._refresh_tray_tip()
 
     # ---------- 菜单 ----------
 
@@ -204,7 +216,6 @@ class PetApp:
 
         menu = build_menu(
             None,
-            self.cfg,
             self.anims,
             size=win.width(),
             fixed=win.fixed,
@@ -285,11 +296,12 @@ def main() -> int:
     signal_tick.timeout.connect(lambda: None)
 
     first = controller.windows[0] if controller.windows else None
+    a = controller.anims
     print(
-        f"[pet] 配置 {CONFIG_FILE.name} · 待机池 {len(controller.cfg.pools.idle)} · "
-        f"点击池 {len(controller.cfg.pools.clicks)} · 转向池 {len(controller.cfg.pools.turn)} · "
-        f"走位池 {len(controller.cfg.pools.moves)} · 分类 {len(controller.cfg.pools.categories)} · "
-        f"宠物 {len(controller.windows)} 只",
+        f"[pet] 配置 {CONFIG_FILE.name} · 待机 {len(a.role_keys('idle'))} · "
+        f"转向 {len(a.role_keys('turn'))} · 拖拽 {len(a.role_keys('drag'))} · "
+        f"走位 {len(a.role_keys('move'))} · 点击 {len(a.role_keys('click'))} · "
+        f"随机 {len(a.random_keys)} · 宠物 {len(controller.windows)} 只",
         flush=True,
     )
     if first is not None:

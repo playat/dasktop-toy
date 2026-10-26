@@ -1,35 +1,48 @@
 @echo off
-chcp 65001 >nul
+rem ---------------------------------------------------------------------------
+rem  Usage (ASCII only on purpose: a UTF-8 batch file gets mis-parsed by cmd.exe,
+rem  which can even mangle the arguments you pass in):
+rem
+rem    1) drop your green-screen mp4 into  video\src  and double-click this file
+rem       -> converts whatever is missing, skips what already exists
+rem       -> output goes straight to  assets\webm  (no copy/sync step)
+rem    2) drag a folder onto this file:  make-webm.cmd "D:\AI_videos"
+rem    3) flags only:                   make-webm.cmd --jobs 8
+rem
+rem  Sub-folders are supported and mirrored:
+rem       video\src\eat\dumpling.mp4  ->  assets\webm\eat\dumpling.webm
+rem  Missing output folders are created for you. Clean up assets\webm yourself.
+rem
+rem  All user-facing Chinese text is printed by the Python script, not here.
+rem ---------------------------------------------------------------------------
 cd /d "%~dp0"
 
-rem 用法一：把 AI 视频文件夹拖到本文件上（默认 --deploy 会问你）
-rem 用法二：make-webm.cmd "D:\AI视频" --deploy --jobs 8
-
 set "PYEXE=.venv\Scripts\python.exe"
-if not exist "%PYEXE%" (
-    echo.
-    echo   [缺少运行环境] 先跑一次 setup-pet.cmd
-    echo.
-    pause
-    exit /b 1
-)
+if not exist "%PYEXE%" goto novenv
 
-if "%~1"=="" (
-    echo.
-    echo   把 AI 绿幕视频文件夹拖到本文件上，或者：
-    echo     make-webm.cmd "D:\AI视频" [--deploy] [--no-watermark] [--jobs 8]
-    echo.
-    pause
-    exit /b 1
-)
+if "%~1"=="" goto default
+if exist "%~1\" goto fromdir
+"%PYEXE%" make_pet_webm.py %*
+goto done
 
-set "SRC=%~1"
+:fromdir
+"%PYEXE%" make_pet_webm.py --src "%~1" %2 %3 %4 %5 %6 %7 %8 %9
+goto done
+
+:default
+"%PYEXE%" make_pet_webm.py
+goto done
+
+:done
+set "RC=%ERRORLEVEL%"
 echo.
-echo   源目录：%SRC%
-echo.
-"%PYEXE%" make_pet_webm.py --src "%SRC%" %2 %3 %4 %5 %6 %7 %8 %9
-set RC=%ERRORLEVEL%
-echo.
-if not "%RC%"=="0" echo   [退出码 %RC%] 上面有报错信息。
+if not "%RC%"=="0" echo   [exit %RC%] see the messages above.
 pause
 exit /b %RC%
+
+:novenv
+echo.
+echo   [missing] .venv not found - run setup-pet.cmd first.
+echo.
+pause
+exit /b 1

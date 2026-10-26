@@ -57,9 +57,12 @@ def strip_jsonc(text: str) -> str:
 
 @dataclass
 class MoveAction:
-    """一个走位动作及其时间参数（未写的字段取 moves.default）。"""
+    """一个走位动作的完整参数（未写的字段取 moves.default）。
 
-    name: str
+    素材本身来自 `assets/webm/走位/`，这里只管手感 —— 名字是文件名 stem。
+    """
+
+    name: str = ""
     min_dist: float = 60
     max_dist: float = 240
     margin: float = 20
@@ -69,14 +72,17 @@ class MoveAction:
 
 @dataclass
 class AnimationPools:
-    idle: list[str] = field(default_factory=lambda: ["待机呼吸休闲"])
-    clicks: list[str] = field(default_factory=list)
-    drag: list[str] = field(default_factory=list)
-    turn: list[str] = field(default_factory=list)
-    moves: list[MoveAction] = field(default_factory=list)
-    categories: list[dict[str, Any]] = field(default_factory=list)
-    # 事件动画（余额/碎碎念/工作状态）——独立模式没有 DSH 事件源，但右键菜单照样能点播预览
-    events: dict[str, list[str]] = field(default_factory=dict)
+    """只装「参数」和「例外清单」—— 播什么素材完全由 assets/webm 的目录结构决定。
+
+    目录名即用途（任意层级都认，见 player.ROLE_DIRS）：
+        待机/ 转向/ 拖拽/ 走位/ 点击回应/   +   其余素材 = 随机小动作池
+    """
+
+    move_default: MoveAction = field(default_factory=MoveAction)
+    # 文件名 stem → 只写了要覆盖的那几个键（minDist/maxDist/margin/leadSec/tailSec）
+    move_overrides: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # 带文字、镜像会颠倒的素材：面向右时改用朝左，不然字是反的
+    no_mirror: set[str] = field(default_factory=set)
 
 
 @dataclass
@@ -84,6 +90,7 @@ class PetSpec:
     """pets[] 里的一只宠物（多开 = 数组里多条）。"""
 
     id: str = "main"
+    name: str = ""
     size: int = 462
     fixed: bool = False
     position: dict[str, Any] = field(default_factory=dict)
@@ -96,6 +103,9 @@ class PetConfig:
     weights: dict[str, float] = field(default_factory=lambda: {"idle": 10, "turn": 5, "move": 5})
     physics: PhysicsParams = field(default_factory=PhysicsParams)
     fixed: bool = False
+    # 根字段（不属于 physics）：抛掷时是否把宠物锁在松手所在那块屏内。
+    # True = 屏缝当墙（不会飞到隔壁屏）；False = 允许跨屏飞行，落到隔壁屏。
+    confine_to_screen: bool = False
     pets: list[PetSpec] = field(default_factory=lambda: [PetSpec()])
     raw: dict[str, Any] = field(default_factory=dict)
 
@@ -107,34 +117,28 @@ class PetConfig:
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "PetConfig":
         pets = raw.get("pets") or [{}]
-        animations = raw.get("animations") or {}
 
-        moves_block = animations.get("moves") or {}
+        moves_block = raw.get("moves") or {}
         base = moves_block.get("default") or {}
-        move_actions: list[MoveAction] = []
+        move_default = MoveAction(
+            min_dist=float(base.get("minDist", 60)),
+            max_dist=float(base.get("maxDist", 240)),
+            margin=float(base.get("margin", 20)),
+            lead_sec=float(base.get("leadSec", 2)),
+            tail_sec=float(base.get("tailSec", 2)),
+        )
+        # actions 只作「按文件名覆盖参数」用；素材本身来自 走位/ 目录，列不列都行
+        move_overrides: dict[str, dict[str, Any]] = {}
         for item in moves_block.get("actions") or []:
-            if "name" not in item:
-                continue
-            merged = {**base, **(item.get("params") or {})}
-            move_actions.append(
-                MoveAction(
-                    name=item["name"],
-                    min_dist=float(merged.get("minDist", 60)),
-                    max_dist=float(merged.get("maxDist", 240)),
-                    margin=float(merged.get("margin", 20)),
-                    lead_sec=float(merged.get("leadSec", 2)),
-                    tail_sec=float(merged.get("tailSec", 2)),
-                )
-            )
+            if isinstance(item, dict) and item.get("name"):
+                params = item.get("params") or {}
+                if isinstance(params, dict) and params:
+                    move_overrides[str(item["name"])] = dict(params)
 
         pools = AnimationPools(
-            idle=list(animations.get("idle") or ["待机呼吸休闲"]),
-            clicks=list(animations.get("clicks") or []),
-            drag=list(animations.get("drag") or []),
-            turn=list(animations.get("turn") or []),
-            moves=move_actions,
-            categories=list(animations.get("categories") or []),
-            events=_parse_events(animations.get("events") or {}),
+            move_default=move_default,
+            move_overrides=move_overrides,
+            no_mirror={str(x) for x in (raw.get("noMirror") or [])},
         )
 
         weights = {"idle": 10.0, "turn": 5.0, "move": 5.0}
@@ -147,6 +151,7 @@ class PetConfig:
         specs = [
             PetSpec(
                 id=str(p.get("id") or f"pet{i + 1}"),
+                name=str(p.get("name") or ""),
                 size=int(p.get("size") or 462),
                 fixed=bool(p.get("fixedEnabled", False)),
                 position=dict(p.get("position") or {}),
@@ -161,21 +166,7 @@ class PetConfig:
             weights=weights,
             physics=PhysicsParams.from_dict(raw.get("physics") or {}),
             fixed=specs[0].fixed,
+            confine_to_screen=bool(raw.get("confineToScreen", False)),
             pets=specs,
             raw=raw,
         )
-
-
-def _parse_events(events: dict[str, Any]) -> dict[str, list[str]]:
-    """事件池可能是「名字数组」或「档位数组」，统一展平成名字数组。"""
-    out: dict[str, list[str]] = {}
-    for key, slots in events.items():
-        names: list[str] = []
-        for slot in slots or []:
-            if isinstance(slot, str):
-                names.append(slot)
-            elif isinstance(slot, (list, tuple)):
-                names.extend(str(x) for x in slot)
-        if names:
-            out[str(key)] = names
-    return out

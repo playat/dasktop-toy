@@ -57,6 +57,7 @@ class PetWindow(QWidget):
         self._phys = cfg.physics
         self._area = QRect(area)
         self._fixed = fixed  # 每只宠物自己的「固定原地」（pets[].fixedEnabled）
+        self._confine = bool(cfg.confine_to_screen)  # 抛掷是否锁在松手那屏（根字段 confineToScreen）
 
         # 绘制
         self._cur: QImage | None = None
@@ -123,18 +124,41 @@ class PetWindow(QWidget):
         不这么做的话，拖到副屏甩出去会被主屏的 max_x/min_x 钳回来，宠物直接瞬移到主屏边缘
         （多屏用户看到的就是"飞一半消失，然后贴回主屏"）。
         """
+        self._adopt_area(self._screen_area_at_center())
+
+    def _follow_screen(self) -> None:
+        """抛掷途中跟着窗口中心换屏（confineToScreen = false 时每帧调）。
+
+        中心落在某块屏上就换成那块屏的边界；落在屏缝 / 所有屏之外（screenAt 返回 None）
+        就保持当前边界，让宠物先把这一步飞完 —— 不会因为"暂时不属于任何屏"被钳在半空。
+        与 _sync_area 的区别：这个不 fallback 到主屏，纯粹跟着中心走。
+        """
+        if self._confine:
+            return
         app = QGuiApplication.instance()
         if app is None:
             return
+        screen = app.screenAt(self.frameGeometry().center())
+        if screen is None:
+            return
+        self._adopt_area(screen.availableGeometry())
+
+    def _screen_area_at_center(self) -> QRect:
+        app = QGuiApplication.instance()
+        if app is None:
+            return self._area
         screen = app.screenAt(self.frameGeometry().center()) or app.primaryScreen()
-        area = screen.availableGeometry()
-        if area != self._area:
-            self._area = QRect(area)
-            self._recalc_geometry(self.width(), self.height())
-            print(
-                f"[pet] 所在屏 → {area.width()}x{area.height()} @({area.left()},{area.top()})",
-                flush=True,
-            )
+        return screen.availableGeometry() if screen is not None else self._area
+
+    def _adopt_area(self, area: QRect) -> None:
+        if area == self._area:
+            return
+        self._area = QRect(area)
+        self._recalc_geometry(self.width(), self.height())
+        print(
+            f"[pet] 所在屏 → {area.width()}x{area.height()} @({area.left()},{area.top()})",
+            flush=True,
+        )
 
     # ---------- 动画链 ----------
 
@@ -156,7 +180,7 @@ class PetWindow(QWidget):
         print(f"[anim] idle → {name}", flush=True)
 
     def _play_action(self) -> None:
-        picked = self._anims.pick_category(self.facing, exclude=self._player.current)
+        picked = self._anims.random_action(self.facing, exclude=self._player.current)
         if picked is None:
             self._play_idle()
             return
@@ -182,7 +206,9 @@ class PetWindow(QWidget):
         move_w = 0.0 if self._fixed else max(0.0, w.get("move", 5.0))
 
         roll = random.uniform(0.0, 100.0)
-        if force_idle or roll < idle_w or not (self._anims.pools.turn or self._anims.pools.moves):
+        has_turn = self._anims.has_role("turn")
+        has_move = self._anims.has_role("move")
+        if force_idle or roll < idle_w or not (has_turn or has_move):
             self._play_idle(force=force_idle)
         elif roll < idle_w + turn_w:
             self._play_turn()
@@ -287,6 +313,10 @@ class PetWindow(QWidget):
         if dt <= 0:
             return
 
+        # 跨屏飞行（confineToScreen = false）：中心进入隔壁屏就换成那块屏的边界继续飞。
+        # 必须在积分前换，否则这一步还会被旧屏的 max_x/min_x 弹回来。
+        self._follow_screen()
+
         before_vy = self._throw.vy
         state, bounced, at_rest = physics.throw_step(self._throw, dt, self._bounds, self._phys)
 
@@ -353,28 +383,29 @@ class PetWindow(QWidget):
 
     # ---------- 菜单 / 外部控制 ----------
 
-    def play_named(self, name: str) -> None:
-        """右键点播一个动作：播一次，播完回到随机链。"""
-        path = self._anims.path_of(name)
+    def play_named(self, key: str) -> None:
+        """右键点播一个动作：播一次，播完回到随机链。
+
+        key 一般是素材名；素材放进了子目录时是「子目录/名字」（见 AnimationSet.scan）。
+        """
+        path = self._anims.path_of(key)
         if path is None:
             return
+        stem = key.rsplit("/", 1)[-1]
 
-        # 走位池里的动作走完整一次走位（不然只有原地踏步，看着像不动的贴图）
-        for action in self._anims.pools.moves:
-            if action.name == name:
+        # 走位目录里的动作走完整一次走位（不然只有原地踏步，看着像不动的贴图）
+        for action, _path in self._anims.moves():
+            if action.name in (key, stem):
                 if self._start_move(preferred=action):
                     return
                 break
 
         # 文字类（noMirror）朝右时先掰回朝左，否则镜像会让字反过来
-        if self.facing == "right" and any(
-            cat.get("noMirror") and name in (cat.get("actions") or [])
-            for cat in self._anims.pools.categories
-        ):
+        if self.facing == "right" and stem in self._anims.pools.no_mirror:
             self.facing = "left"
 
-        if self._play(name, path, loop=False, state="action", on_finish=self._after_oneshot):
-            print(f"[anim] menu → {name}", flush=True)
+        if self._play(key, path, loop=False, state="action", on_finish=self._after_oneshot):
+            print(f"[anim] menu → {key}", flush=True)
 
     @property
     def fixed(self) -> bool:
