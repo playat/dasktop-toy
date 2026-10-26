@@ -269,7 +269,8 @@ build.cmd --clean        :: 先清 build/ 和 dist/ 再打
 | `dsh-pet.log` | 打包版没有控制台，日志写在这里 |
 
 首次构建会自动装 PyInstaller。目录版约 136MB（素材 53MB + 运行时 78MB）。
-exe 图标从待机动画首帧抠出来，`--no-icon` 可以跳过。
+exe 图标取 `assets/webm/待机/` 里第一个素材的首帧（没有待机素材就退到随机池），
+生成 `build/pet.ico` 再嵌进 exe；`--no-icon` 可以跳过。构建结束会读回 exe 校验图标是否真的嵌进去了。
 
 注意：`--onefile` 每次启动都要把几十 MB 解压到临时目录，观感上会慢 2~3 秒，素材改动也得重编译 —— 日常用目录版就够了。
 

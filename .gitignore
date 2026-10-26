@@ -15,7 +15,7 @@ video/*.mkv
 
 # ── 打包产物 ──
 build/
-dist/
+dist
 *.spec
 
 # ── 临时 ──

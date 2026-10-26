@@ -61,20 +61,29 @@ def _first_frame_rgba(path: Path):
 
 
 def make_icon() -> Path | None:
-    """从待机动画首帧生成 build/pet.ico；任何一步失败都只是没有图标，不阻断构建。"""
+    """从待机动画首帧生成 build/pet.ico；任何一步失败都只是没有图标，不阻断构建。
+
+    素材的「待机」是由目录决定的（`AnimationSet.role_keys("idle")` 读 assets/webm/待机/），
+    不再从 config.jsonc 的池子里取 —— 配置里已经没有素材清单了。
+    """
     try:
         import numpy as np
         from PIL import Image
 
         from config import PetConfig
+        from player import AnimationSet
 
         cfg = PetConfig.load(ROOT / "config.jsonc")
-        name = cfg.pools.idle[0] if cfg.pools.idle else None
-        if name is None:
+        anims = AnimationSet(ROOT / "assets" / "webm", cfg)
+        # 优先待机（站着不动的姿态当图标最合适），没有就退到随机池、再退到任意素材
+        keys = anims.role_keys("idle") or anims.random_keys or list(anims.index)
+        if not keys:
+            print("[图标] 跳过（assets/webm 里没有可用素材）")
             return None
-        src = ROOT / "assets" / "webm" / f"{name}.webm"
-        if not src.exists():
+        src = anims.path_of(keys[0])
+        if src is None or not src.exists():
             return None
+        print(f"      取首帧：{src.relative_to(ROOT)}")
 
         arr = _first_frame_rgba(src)
         if arr is None:
@@ -101,6 +110,33 @@ def make_icon() -> Path | None:
 
 
 # ---------------------------------------------------------------- 构建
+
+def icon_state(exe: Path, ico: Path) -> tuple[int, int] | None:
+    """检查 exe 里嵌的图标是不是我们这张 ico。返回 (命中数, ico 里的图数)，None = 读不了。
+
+    为什么不能数资源个数：不给 --icon 时 PyInstaller 也会塞自己的默认图标（16/32/48/256），
+    资源永远存在，看不出区别。而 RT_ICON 里存的就是 ico 每个尺寸的原始图像块，
+    所以拿 ico 的图像数据去 exe 里做子串匹配是可靠的判据。
+    """
+    try:
+        raw = ico.read_bytes()
+        if len(raw) < 6 or raw[:4] != b"\x00\x00\x01\x00":  # ICONDIR
+            return None
+        count = int.from_bytes(raw[4:6], "little")
+        payloads = []
+        for i in range(count):
+            e = 6 + i * 16
+            size = int.from_bytes(raw[e + 8: e + 12], "little")
+            off = int.from_bytes(raw[e + 12: e + 16], "little")
+            if size and off + size <= len(raw):
+                payloads.append(raw[off: off + size])
+        if not payloads:
+            return None
+        data = exe.read_bytes()
+        return sum(1 for p in payloads if len(p) >= 256 and p in data), len(payloads)
+    except Exception:  # noqa: BLE001
+        return None
+
 
 def ensure_pyinstaller() -> None:
     try:
@@ -144,7 +180,7 @@ def main() -> int:
 
     print("[2/4] 生成图标 ...")
     icon = None if args.no_icon else make_icon()
-    print(f"      {icon.name if icon else '无（用默认图标）'}")
+    print(f"      {icon.relative_to(ROOT) if icon else '无（exe 将用默认图标）'}")
 
     print("[3/4] PyInstaller 打包中（首次约 1~2 分钟）...")
     cmd = [
@@ -181,6 +217,17 @@ def main() -> int:
 
     print("[4/4] 摆配置和素材 ...")
     stage(out_root)
+
+    # 读回 exe 确认图标真的嵌进去了（别信「参数传了就等于生效」）
+    hit = icon_state(exe, icon) if icon else None
+    if hit is None:
+        print("      图标校验跳过（读不了 exe / ico）")
+    elif hit[0] == hit[1]:
+        print(f"      图标已嵌入 exe（{hit[1]} 个尺寸全部命中）")
+    elif hit[0]:
+        print(f"      [警告] 图标只嵌进去一部分（{hit[0]}/{hit[1]} 个尺寸）")
+    else:
+        print("      [警告] exe 里没找到这张图标，用的是 PyInstaller 默认图标 —— 试试 build.py --clean")
 
     size_mb = sum(f.stat().st_size for f in out_root.rglob("*") if f.is_file()) / 1024 / 1024
     print(f"\n完成 → {exe}")
