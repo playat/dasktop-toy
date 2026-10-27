@@ -4,3 +4,6 @@ PySide6-Essentials>=6.7
 
 # 工作区根的素材生成工具 make_pet_webm.py 也要用：
 pillow>=10
+
+# 读 dsh 会话日志（zstd 多帧）用；Python 3.14+ 可用标准库 compression.zstd 代替
+zstandard>=0.22

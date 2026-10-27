@@ -7,12 +7,16 @@
     GET  /dsh-pet-7340/state?since=&timeout=   长轮询：所有状态位的唯一出口（只读、纯内存）
     POST /dsh-pet-7340/whisper?pet=            让 DSH 用它配的模型生成一句碎碎念
     POST /dsh-pet-7340/chat?pet=               对桌宠说一句话（带记忆）
-    POST /dsh-pet-7340/balance                 立即刷新一次余额
+    POST /dsh-pet-7340/balance                 立即刷新一次余额（本版不调用，见下）
     POST /dsh-pet-7340/pose/report?pet=        上报桌面宠物位置（网页端/第三方能读到）
 
 **探测不到就整块关掉**。顺序：`config.dsh.baseUrl` → 环境变量 `DSH_PET_URL` / `DSH_WEB_URL`
-→ 默认 3080。找不到就退化成纯本地模式，所有依赖 DSH 的入口（余额、工作状态、通知、AI 说话）
-自动隐藏，桌宠照常跑 —— 用户要的就是「没 DSH 环境就别开这套」。
+→ 默认 3080。找不到就退化成纯本地模式，依赖 DSH 的入口（工作状态、通知、AI 说话）自动隐藏，
+桌宠照常跑 —— 用户要的就是「没 DSH 环境就别开这套」。
+
+**余额不走这条路**：`events.refresh_balance()` 固定调 `balance.py` 直连（读本机 dsh 登录凭据
+直接问 DeepSeek Platform），不看 DSH 在不在；`state` 里的 `balance` 叶子也刻意不订阅，
+避免同一个数字出现两套口径。
 
 叶子比对沿用上游口径：每个叶子 `{counter, data}`，**counter 变了才算更新**；首次拉到只记基线
 不渲染，否则启东瞬间会把上一次运行留下的旧状态全播一遍。
@@ -96,7 +100,7 @@ def detect(configured: str = "") -> tuple[str | None, str]:
         state = _request(f"{base}{PREFIX}/state", timeout=PROBE_TIMEOUT)
         if isinstance(state, dict) and "pets" in state:
             return base, f"已连上 {base}（DSH 桌宠插件在跑）"
-    return None, "没找到 DSH（跳过余额/工作状态/通知/DSH 说话，纯本地模式）"
+    return None, "没找到 DSH（跳过工作状态/通知/DSH 说话，纯本地模式）"
 
 
 # ---------------------------------------------------------------- 桥
@@ -109,7 +113,6 @@ class DshBridge(QObject):
     say = Signal(str, str, str, int)    # pet, text, image(池内名或空), duration_ms
     anim = Signal(str, str)             # pet, 动画名
     work_status = Signal(object)        # dict|None → WorkStatusSnapshot
-    balance = Signal(object)            # dict|None → BalanceState
     notify = Signal(object)             # dict → NotifyFrame
     locked = Signal(str, bool)          # pet, 是否被第三方占用
     spoken = Signal(str, str, str)      # pet, text, image —— whisper/chat 的回复
@@ -147,9 +150,6 @@ class DshBridge(QObject):
 
     def chat(self, text: str, pet: str | None = None) -> None:
         self._fire(lambda: self._post_command("/chat", pet, "spoken_or_say", {"text": text}))
-
-    def refresh_balance(self) -> None:
-        self._fire(lambda: self._request("/balance", method="POST", body={}))
 
     def set_pose(self, pet: str, x: float, y: float, facing: str) -> None:
         """记录最新位置，由轮询线程顺手上报（不额外开线程）。"""
@@ -267,8 +267,6 @@ class DshBridge(QObject):
             data = leaf.get("data") if isinstance(leaf, dict) else None
             if key == "workStatus":
                 self.work_status.emit(data if isinstance(data, dict) else None)
-            elif key == "balance":
-                self.balance.emit(data if isinstance(data, dict) else None)
             elif key == "notify":
                 if isinstance(data, dict):
                     self.notify.emit(data)

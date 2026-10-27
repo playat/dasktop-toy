@@ -287,12 +287,22 @@ class PetApp:
         spawn_act.triggered.connect(lambda _checked=False: self.spawn())
 
         pet_id = getattr(win, "pet_id", None)
-        type_act = QAction(
-            "DSH：已连接" if self.events.dsh_online else "DSH：未连接（纯本地）", win
+        # 这一行只说 DSH 自己的状态；余额是独立通道（balance.py 直连），不受它影响
+        dsh_label = (
+            "DSH：已连接" if self.events.dsh_online else "DSH：未连接（通知/DSH 说话不可用）"
         )
+        type_act = QAction(dsh_label, win)
         type_act.setEnabled(False)
         if self.cfg.ai.ready:
             type_act.setToolTip(f"本机模型：{self.cfg.ai.model}")
+
+        # 会话状态一行（从 dsh 日志推断出来的「现在在干什么」，比 DSH 的 workStatus 更细）
+        extra = [*self.events.menu_actions(pet_id)]
+        if self.events.session_brief:
+            brief_act = QAction(f"会话：{self.events.session_brief}", win)
+            brief_act.setEnabled(False)
+            extra.append(brief_act)
+        extra.extend([spawn_act, type_act])
 
         menu = build_menu(
             None,
@@ -305,7 +315,7 @@ class PetApp:
             on_home=win.reset_home,
             on_reload=self.reload,
             on_quit=self.quit,
-            extra=[*self.events.menu_actions(pet_id), spawn_act, type_act],
+            extra=extra,
         )
         menu.exec(global_pos)
 

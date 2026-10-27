@@ -405,6 +405,9 @@ def main() -> int:
         "--specpath", str(BUILD_DIR),
         # av 自带 ffmpeg 的 dll，不整包收进来运行时会找不到 libvpx
         "--collect-all", "av",
+        # zstandard 是编译扩展（还带 backend_c/backend_rust 子模块），整包收更保险：
+        # 收不全的话「读 dsh 会话日志」在打包版里会静默降级
+        "--collect-all", "zstandard",
         # 运行时不碰这两个，收进去纯浪费体积
         "--exclude-module", "PIL",
         "--exclude-module", "tkinter",

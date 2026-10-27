@@ -109,6 +109,47 @@ make-webm.cmd                                  :: 双击 = 处理 video/src，�
 - 菜单「大小」不写回配置（重启回 462）。
 - `config.jsonc` 是从原插件整份拷来的，含大量 DSH 时代注释，只有部分字段 pet_py 会读。
 
+## 余额（唯一通道：直连，2026-10-27 用户定档）
+
+- **不看 DSH 是否启动**（用户 2026-10-27 明确要求）：`events.refresh_balance()` 只调
+  `balance.py` 直连，没有回退分支；`DshBridge` 的 `balance` 信号 /
+  `refresh_balance()` / `elif key == "balance"` 分发**已删**，`state` 的 balance 叶子不订阅。
+- `EventDirector.balance_ready` = `balance_direct.available(cfg)`（只看凭据文件在不在）。
+- 配置里**没有** `balanceDirect` 了（只有 `events.balanceEnabled` + 凭据在不在两个开关）。
+- 直连做法：读 `$DSH_HOME/.credentials.yaml` 里
+  `records."deepseek-account-platform/default".payload.token`，带 `x-dsh-auth-token` 请求
+  `{issuer}/api/v0/users/get_user_summary`（**2026-10-27 已把 `balance_watch.py` 整个并入
+  `balance.py`**，不再有第二个文件；`python balance.py` 就是原来的命令行，`--watch` / `--json` / `--threshold` / `--token` / `--home` / `--issuer` / `--timeout` 全保留）。
+- `balance.py` 把结果包成 `{ok, shape:"money", data:{wallets:[{currency,total,fullBalance}]}, text}`，
+  `total` = 充值+赠金，`fullBalance` = 配置 `dsh.balanceFull`（默认 100，0 = 不折算）；
+  这样能直接复用现成的 `balance_percent` → `balance_event_index` 六档。
+- 配置：`dsh.balanceFull / balanceHome / balanceTimeout`（仍在 dsh 段，只是取数不走 dsh）。
+- **凭据等同密码**：只读 token 用于请求，不打印不进日志。token 失效是 HTTP 401 或 `code=40003`。
+- 直连查询在工作线程跑，结果靠 `_Signals.balance`（`Signal(object)`）回主线程；`_balance_busy` 防重入。
+
+## 会话状态（日志观察，2026-10-27）
+
+- **读日志引擎现在在 `session.py` 第一部分**（原 `pet_state.py` 于 2026-10-27 并入）：读 `$DSH_HOME/sessions/*/session-*/session.*.jsonl*`，
+  zstd 多帧增量解码 → `idle/thinking/tool/waiting_approval/waiting_answer` + notices
+  （完成/出错/审批/后台任务/交付）。仍能单独跑：`python session.py`（一行）/`--json`/`--all`/`--watch 2`。
+- ⚠ **解码坑**：dsh 写的是**流式帧**（帧头没有 content size），`zstandard.decompress()`
+  直接报 `could not determine content size in frame header`，`_decode_frames` 把它吞掉 →
+  **0 个事件**（看着像「日志是空的」）。必须
+  `ZstdDecompressor().decompress(blob, max_output_size=64<<20)`。已改成三级降级。
+- `first_read_limit=4MB` 会跳过文件头 → 大日志的 `session_id/cwd` 可能为空，
+  `session._sid_of()` 用 `path` 兜底。
+- **触发决策在 `session.py` 第二部分**：`SessionWatcher`（线程 + `Signal(object)`）+
+  `ReactionPolicy`（纯逻辑，`plan(snapshot)` 出 `("hold"|"play"|"say", …)`）。
+  **触发规则六条写在文件头**，要改行为先读那段。
+- 触发要点：只认 `(会话, status)` 跃迁；`thinking↔tool` 要稳 `minHoldMs` 才认；
+  首次/换会话只对齐动画**不弹气泡**；notice 天然只播一次；催促有上限，计时从
+  「我们确认状态」起（忙碌内部一切换就清零 = 在动就别催）。
+- `events.on_work_status()` 在 `session_ready` 时直接 return —— 日志观察优先，
+  DSH 的 workStatus 让位（两个来源会抢同一个动画）。
+- 窗口层 `PetWindow.set_status()/_apply_status()/play_effect()`：状态动画播完**自动重播**，
+  拖拽/飞行/被占用时挂起，`_roll_next()` 里补。
+- 依赖 `zstandard`（requirements.txt + build 的 `--collect-all zstandard`）。
+
 ## 打包（build.py / build.cmd）
 
 - PyInstaller onedir → `dist/`，**平铺，没有 `dist/DshPet/` 这层**（2026-10-26 改的用户要求）。

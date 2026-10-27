@@ -100,12 +100,20 @@ class DshConfig:
 
     `base_url` 留空 = 自动探测：环境变量 DSH_PET_URL / DSH_WEB_URL → 默认 3080 端口。
     探测不到就整块功能静默关闭，桌宠照常跑（纯本地模式）。
+
+    余额**不走这里**：它固定走 `balance.py` 的直连（读 dsh 的登录凭据问 DeepSeek Platform），
+    与 DSH 有没有在跑无关，所以 `balance_full` / `balance_home` / `balance_timeout` 放在本段
+    只是为了「和 dsh 相关配置放一起」。`balance_full` 是折算百分比用的参考额度
+    （余额到这个数算钱袋满溢），填 0 就只弹数字不动画。
     """
 
     enabled: bool = True
     base_url: str = ""
     pet_id: str = ""       # 上报/读取哪只宠物的槽位；空 = pets[0].id
     report_pose: bool = True
+    balance_full: float = 100.0
+    balance_home: str = ""
+    balance_timeout: float = 30.0
 
 
 @dataclass
@@ -149,6 +157,31 @@ class EventsConfig:
 
 
 @dataclass
+class SessionConfig:
+    """读 dsh 的会话日志推断「现在在干什么」（`pet_state.py` + `session.py`）。
+
+    不联网、不看 dsh 是否在跑，只看磁盘上 append-only 的日志，所以它比 DSH 的
+    工作状态更「实时」也更细（能知道在调哪个工具、在等谁点头）。
+
+    这里的参数**全部是触发时机**，含义见 `session.py` 顶部的「什么时候触发」。
+    """
+
+    enabled: bool = True
+    home: str = ""                 # 空 = $DSH_HOME 或 ~/.dsh
+    poll_ms: int = 1500            # 轮询间隔（日志是增量读的，不用怕大文件）
+    stale_sec: int = 600           # 多久没新事件就判定这一轮已经结束（进程崩了）
+    min_hold_ms: int = 1200        # 「想 ↔ 做」来回切的抖动窗口：稳这么久才认
+    bubble: bool = True            # 状态跃迁要不要顺带说一句（false = 只播动画）
+    wait_nudge_sec: int = 25       # 等主人点头/回答，多久开始催
+    wait_repeat_sec: int = 90      # 之后每隔多久再催
+    wait_nudge_max: int = 3        # 最多催几次（催不动就不催了）
+    busy_nudge_sec: int = 180      # 一直忙，多久说一句
+    busy_nudge_max: int = 2
+    max_sessions: int = 8          # 最多同时盯几个会话（取最近改动的那些）
+    texts: dict[str, list[str]] = field(default_factory=lambda: dict(DEFAULT_SESSION_TEXTS))
+
+
+@dataclass
 class PetSpec:
     """pets[] 里的一只宠物（多开 = 数组里多条）。"""
 
@@ -172,6 +205,7 @@ class PetConfig:
     pets: list[PetSpec] = field(default_factory=lambda: [PetSpec()])
     font: FontConfig = field(default_factory=FontConfig)
     dsh: DshConfig = field(default_factory=DshConfig)
+    session: SessionConfig = field(default_factory=SessionConfig)
     ai: AiConfig = field(default_factory=AiConfig)
     events: EventsConfig = field(default_factory=EventsConfig)
     # 表情包：名字 → 一句话描述（AI 选图用，也当菜单悬停提示）
@@ -239,6 +273,7 @@ class PetConfig:
             pets=specs,
             font=_font(raw.get("font") or {}),
             dsh=_dsh(raw.get("dsh") or {}),
+            session=_session(raw.get("session") or {}),
             ai=_ai(raw.get("ai") or {}),
             events=_events(raw),
             memes={str(k): str(v) for k, v in (raw.get("memes") or {}).items() if isinstance(k, str)},
@@ -276,6 +311,9 @@ def _dsh(raw: dict[str, Any]) -> DshConfig:
         base_url=str(raw.get("baseUrl") or "").strip(),
         pet_id=str(raw.get("petId") or "").strip(),
         report_pose=bool(raw.get("reportPose", True)),
+        balance_full=_num(raw.get("balanceFull"), 100.0),
+        balance_home=str(raw.get("balanceHome") or "").strip(),
+        balance_timeout=max(3.0, _num(raw.get("balanceTimeout"), 30.0)),
     )
 
 
@@ -299,6 +337,42 @@ DEFAULT_WORK_TEXTS: list[list[str]] = [
     ["这一轮搞定啦，真棒！", "任务完成咯，可以摸鱼啦~"],
     ["这一步好像没跑通呢", "刚才的操作遇到点问题哦", "这里卡了一下，再等等你呢"],
 ]
+
+
+# 会话状态跃迁时说的话（notice 类事件用读日志那一半自带的那句，不在这里配）
+DEFAULT_SESSION_TEXTS: dict[str, list[str]] = {
+    "start": ["开工啦～", "收到，开始干活", "让我看看要做什么"],
+    "wait": ["还在等你哦", "有空看一眼嘛", "卡在等你这一步啦"],
+    "busy": ["这活儿有点长呢", "还在忙，快好了吧…", "手头这个有点费劲呢"],
+}
+
+
+def _session(raw: dict[str, Any]) -> SessionConfig:
+    cfg = SessionConfig()
+    cfg.enabled = bool(raw.get("enabled", True))
+    cfg.home = str(raw.get("home") or "").strip()
+    cfg.poll_ms = int(max(300, _num(raw.get("pollMs"), 1500)))
+    cfg.stale_sec = int(max(30, _num(raw.get("staleSec"), 600)))
+    cfg.min_hold_ms = int(max(0, _num(raw.get("minHoldMs"), 1200)))
+    cfg.bubble = bool(raw.get("bubble", True))
+    cfg.wait_nudge_sec = int(max(5, _num(raw.get("waitNudgeSec"), 25)))
+    cfg.wait_repeat_sec = int(max(10, _num(raw.get("waitRepeatSec"), 90)))
+    cfg.wait_nudge_max = int(max(0, _num(raw.get("waitNudgeMax"), 3)))
+    cfg.busy_nudge_sec = int(max(10, _num(raw.get("busyNudgeSec"), 180)))
+    cfg.busy_nudge_max = int(max(0, _num(raw.get("busyNudgeMax"), 2)))
+    cfg.max_sessions = int(max(1, _num(raw.get("maxSessions"), 8)))
+
+    texts = raw.get("texts")
+    if isinstance(texts, dict):
+        merged = {key: list(rows) for key, rows in DEFAULT_SESSION_TEXTS.items()}
+        for key, rows in texts.items():
+            cleaned = (
+                [str(x) for x in rows if isinstance(x, str)] if isinstance(rows, list) else []
+            )
+            if cleaned:
+                merged[str(key)] = cleaned
+        cfg.texts = merged
+    return cfg
 
 
 def _events(raw: dict[str, Any]) -> EventsConfig:

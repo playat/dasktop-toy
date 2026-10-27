@@ -107,6 +107,8 @@ class PetWindow(QWidget):
         self.bubble = None
         # DSH 第三方占用锁：true = 不自己掷骰、不自己走（显式点播照常）
         self.external_lock = False
+        # 外部状态驱动的「持续动画」（工作状态-*）；None = 走原来的随机链
+        self._status_anim: str | None = None
         # 点击音效 + 拖拽光标（素材在 assets/sound、assets/pic）
         self.click_sound: Path | None = None
         self._last_click_sound = 0.0
@@ -264,6 +266,9 @@ class PetWindow(QWidget):
         if self.external_lock:
             # 被第三方占用：只保持当前画面，不自己开新动作（显式点播/点击回应照常走别的入口）
             return
+        # 被拖/被甩期间攒下的状态动画，落回地面就补上
+        if self._status_anim is not None and self._apply_status():
+            return
         w = self._cfg.weights
         idle_w = max(0.0, w.get("idle", 10.0))
         turn_w = 0.0 if self._fixed else max(0.0, w.get("turn", 5.0))
@@ -286,7 +291,49 @@ class PetWindow(QWidget):
         """一次性动画播完后的分派（player.tick 内回调）。"""
         if self.state == "turn":
             self.facing = "right" if self.facing == "left" else "left"
+        # 有「持续状态」就接着播它（工作状态是持续的，不能播一遍就回去发呆）
+        if self._status_anim is not None and self._apply_status():
+            return
         self._roll_next()
+
+    # ---------- 外部状态（工作状态-* 这类持续动画） ----------
+
+    def set_status(self, key: str | None) -> None:
+        """切到某个「持续状态」动画：播完自动重播，直到被换掉或清空。
+
+        拖拽/抛掷/被第三方占用时先只记住，等能播的时候（`_roll_next`）再补 ——
+        总比在飞行途中把动画掰断好。
+        """
+        key = key or None
+        if key == self._status_anim:
+            return
+        self._status_anim = key
+        if key is None:
+            if self.state == "status":
+                self._play_idle()
+            return
+        self._apply_status()
+
+    def _apply_status(self) -> bool:
+        if self._status_anim is None:
+            return False
+        if self.external_lock or self.state in ("drag", "throw"):
+            return False
+        path = self._anims.path_of(self._status_anim)
+        if path is None:
+            return False
+        if self._play(
+            self._status_anim, path, loop=False, state="status", on_finish=self._after_oneshot
+        ):
+            print(f"[anim] status → {self._status_anim}", flush=True)
+            return True
+        return False
+
+    def play_effect(self, key: str) -> None:
+        """状态特效（庆祝/叹气这类一次性动作）：正在拖拽或飞行时不打断。"""
+        if self.state in ("drag", "throw"):
+            return
+        self.play_named(key)
 
     # ---------- 走位 ----------
 

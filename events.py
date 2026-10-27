@@ -1,13 +1,17 @@
 """事件编排：把「谁在什么时候说什么、播什么」收在一处。
 
-三个数据源，优先级从高到低：
+说话/动画类功能分三档，优先级从高到低：
 
-1. **DSH**（`dsh.py`）—— 余额、工作状态、通知、点播动画、用 DSH 自己的模型说话。装了 DSH
+1. **DSH**（`dsh.py`）—— 工作状态、通知、点播动画、用 DSH 自己的模型说话。装了 DSH
    且插件在跑才有；这是原插件的原生链路。
 2. **本机大模型**（`ai.py`）—— 只覆盖「说话」这一类（碎碎念 / 对话 / 挑表情包配图）。
    没 DSH 但有 API 时用它，端上和原插件的「独立模式」一个思路。
-3. **纯本地** —— 既没 DSH 也没配模型：只播动画（余额/工作状态/碎碎念的素材本来就在），
+3. **纯本地** —— 既没 DSH 也没配模型：只播动画（工作状态/碎碎念的素材本来就在），
    不弹文字气泡。所有依赖网络的入口自动隐藏。
+
+**余额不在这三档里**：它固定走 `balance.py` 的直连（读本机 dsh 登录凭据直接问
+DeepSeek Platform），**跟 DSH 有没有启动完全无关** —— 不会为了看一眼余额去拉个服务起来，
+也不会因为 DSH 在线就换一条路、换一套口径。唯一的开关是凭据在不在（+ `events.balance`）。
 
 素材按**名字**找（和上游 config.jsonc 的池子同名，仓库里就是这套名字）：
     余额-钱袋满溢 / 金袋叮当 / 钱袋如常 / 数金皱眉 / 袋空如洗 / 分文不剩   ← 0~100% 六档
@@ -29,10 +33,13 @@ from PySide6.QtGui import QAction
 from PySide6.QtWidgets import QInputDialog
 
 import ai
+import balance as balance_direct
+import session as session_log
 from bubble import SpeechBubble
 from config import PetConfig
 from dsh import DshBridge
 from memes import MemePool
+from session import ReactionPolicy, SessionWatcher
 
 # ---------------- 名字表（与上游 config.jsonc 的 events 池一致） ----------------
 
@@ -157,6 +164,10 @@ def balance_event_index(percent: float) -> int:
 
 
 def balance_text(state: dict[str, Any]) -> str:
+    # 直连（balance.py）会自己组织一句更好读的话（含赠金、累计消费），直接用它的
+    custom = state.get("text")
+    if isinstance(custom, str) and custom.strip():
+        return custom.strip()
     if not state.get("ok"):
         reason = str(state.get("error") or state.get("reason") or "取不到")
         return f"余额暂时取不到（{reason}）"
@@ -190,6 +201,10 @@ class EventDirector(QObject):
         self.anims = anims
         self.memes = MemePool(self.assets, cfg.memes)
         self.bridge: DshBridge | None = None
+        # 会话日志观察（读 dsh 的 session 日志，比 DSH 的 workStatus 更实时）
+        self.session_watcher: SessionWatcher | None = None
+        self.session_policy = ReactionPolicy(cfg.session)
+        self.session_brief = ""        # 菜单里那行「会话：…」用
 
         self._bubbles: dict[str, SpeechBubble] = {}
         self._windows: dict[str, Any] = {}
@@ -204,6 +219,11 @@ class EventDirector(QObject):
         self._ai_busy: set[str] = set()
         self._ai_done = _Signals()
         self._ai_done.done.connect(self._on_ai_reply)
+        # 直连查余额在工作线程里跑，结果经这个信号回主线程（别在子线程里碰 Qt 控件）
+        self._balance_done = _Signals()
+        self._balance_done.balance.connect(self.on_balance)
+        self._balance_busy = False
+        self._last_balance_text = ""   # 最近一次查到的余额（菜单里直接显示，不用等气泡）
         # 右键菜单里的子菜单要留引用：QMenu 没人引用就会被回收，
         # 返回的 menuAction() 跟着失效（PySide 报 "QAction already deleted"）
         self._keep_menus: list = []
@@ -266,7 +286,7 @@ class EventDirector(QObject):
                 self.bridge.say.connect(self._on_say)
                 self.bridge.anim.connect(self._on_anim)
                 self.bridge.work_status.connect(self.on_work_status)
-                self.bridge.balance.connect(self.on_balance)
+                # 余额不接 DSH 的 balance 叶子：它只走 balance.py 直连，见 refresh_balance()
                 self.bridge.notify.connect(self.on_notify)
                 self.bridge.locked.connect(self.on_locked)
                 self.bridge.spoken.connect(self._on_spoken)
@@ -274,17 +294,38 @@ class EventDirector(QObject):
         else:
             self.status.emit("[dsh] 配置里关掉了（dsh.enabled = false）")
 
+        # 会话日志观察：比 DSH 的 workStatus 更实时，也更有细节（在调哪个工具、在等谁点头）
+        if cfg.session.enabled:
+            ok, note = session_log.detect(cfg.session)
+            self.status.emit(f"[会话] {note}")
+            if ok:
+                self.session_watcher = SessionWatcher(cfg.session)
+                self.session_watcher.snapshot.connect(self.on_session_snapshot)
+                self.session_watcher.fault.connect(lambda msg: self.status.emit(f"[会话] {msg}"))
+                self.session_watcher.start()
+        else:
+            self.status.emit("[会话] 配置里关掉了（session.enabled = false）")
+
         if cfg.ai.ready:
             self.status.emit(f"[ai] 本机模型 {cfg.ai.model}（说话类功能可用）")
 
+        if balance_direct.available(cfg):
+            cred = balance_direct.credentials_file(cfg)
+            self.status.emit(f"[余额] 直连可用（凭据 {cred}），不看 DSH 在不在")
+        else:
+            self.status.emit("[余额] 读不到 dsh 登录凭据，余额功能不启用")
+
         if cfg.events.whisper_sec > 0 and self.whisper_ready:
             self._whisper_timer.start(max(30, cfg.events.whisper_sec) * 1000)
-        if cfg.events.balance_sec > 0 and self.bridge is not None:
+        if cfg.events.balance_sec > 0 and self.balance_ready:
             self._balance_timer.start(max(60, cfg.events.balance_sec) * 1000)
 
     def stop(self) -> None:
         self._whisper_timer.stop()
         self._balance_timer.stop()
+        if self.session_watcher is not None:
+            self.session_watcher.stop()
+            self.session_watcher = None
         if self.bridge is not None:
             self.bridge.stop()
             self.bridge = None
@@ -303,7 +344,13 @@ class EventDirector(QObject):
 
     @property
     def balance_ready(self) -> bool:
-        return self.bridge is not None
+        """能不能查余额：只看本机有没有 dsh 登录凭据，与 DSH 是否在跑无关。"""
+        return balance_direct.available(self.cfg)
+
+    @property
+    def session_ready(self) -> bool:
+        """能不能从会话日志推断状态（日志目录在 + zstd 可用）。"""
+        return self.session_watcher is not None
 
     # ---------------- 说话 ----------------
 
@@ -497,6 +544,13 @@ class EventDirector(QObject):
 
         if self.balance_ready:
             say_menu.addSeparator()
+            if self._last_balance_text:
+                shown = self._last_balance_text
+                label = shown if len(shown) <= 30 else shown[:29] + "…"
+                info_act = QAction(label, say_menu)   # 文案自己就带「余额」开头，不再重复加前缀
+                info_act.setEnabled(False)
+                info_act.setToolTip(shown)
+                say_menu.addAction(info_act)
             balance_act = QAction("刷新余额", say_menu)
             balance_act.triggered.connect(lambda _c=False: self.refresh_balance())
             say_menu.addAction(balance_act)
@@ -512,8 +566,6 @@ class EventDirector(QObject):
 
     def _on_online(self, online: bool, note: str) -> None:
         self.status.emit(f"[dsh] {note}")
-        if online and self.cfg.events.balance_sec > 0 and not self._balance_timer.isActive():
-            self._balance_timer.start(max(60, self.cfg.events.balance_sec) * 1000)
         if online and self.cfg.events.whisper_sec > 0 and not self._whisper_timer.isActive():
             self._whisper_timer.start(max(30, self.cfg.events.whisper_sec) * 1000)
 
@@ -532,6 +584,9 @@ class EventDirector(QObject):
 
     def on_work_status(self, snapshot: dict[str, Any] | None) -> None:
         if not self.cfg.events.work_status:
+            return
+        if self.session_ready:
+            # 日志观察已经在管工作状态了；DSH 这条再播一遍会互相打断（两个来源抢同一个动画）
             return
         if not isinstance(snapshot, dict):
             return
@@ -552,11 +607,38 @@ class EventDirector(QObject):
             line = random.choice(texts[index])
             self.say(pet_id, f"{line}\n{_truncate(task)}" if task else line, duration_ms=6000)
 
+    def on_session_snapshot(self, payload: dict[str, Any] | None) -> None:
+        """会话日志的心跳（主线程）：策略决定该不该反应，这里只负责执行。"""
+        if not isinstance(payload, dict):
+            return
+        if not self.cfg.events.work_status:
+            return                      # 工作状态总开关关掉时，状态类反应一并不做
+        brief = str(payload.get("brief") or "")
+        if brief:
+            self.session_brief = brief
+        acts = self.session_policy.plan(payload)
+        if not acts:
+            return
+        win = self._win(None)
+        pet_id = self._pet_arg(None)
+        for act in acts:
+            kind = act[0]
+            if kind == "hold":
+                if win is not None:
+                    win.set_status(act[1])
+            elif kind == "play":
+                if win is not None:
+                    win.play_effect(act[1])
+            elif kind == "say":
+                self.say(pet_id, act[1], duration_ms=7000)
+
     def on_balance(self, state: dict[str, Any] | None) -> None:
         if not self.cfg.events.balance:
             return
         if not isinstance(state, dict):
             return
+        text = balance_text(state)
+        self._last_balance_text = text      # 菜单里那行「余额：…」用
         win = self._win(None)
         if win is None:
             return
@@ -566,7 +648,7 @@ class EventDirector(QObject):
             anim = BALANCE_ANIMS[index]
             if self.anims.path_of(anim) is not None:
                 win.play_named(anim)
-        self.say(self._pet_arg(None), balance_text(state), duration_ms=8000, whisper=False)
+        self.say(self._pet_arg(None), text, duration_ms=8000, whisper=False)
 
     def on_notify(self, frame: dict[str, Any]) -> None:
         if not self.cfg.events.notify:
@@ -592,8 +674,29 @@ class EventDirector(QObject):
         self.status.emit(f"[dsh] {pet_id} {'被第三方占用，暂时静止' if locked else '解除占用'}")
 
     def refresh_balance(self) -> None:
-        if self.bridge is not None and self.dsh_online:
-            self.bridge.refresh_balance()
+        """刷新余额：只走 `balance.py` 直连，**不看 DSH 在不在**（没有回退分支）。"""
+        self._refresh_balance_direct()
+
+    def _refresh_balance_direct(self) -> None:
+        """读本机凭据直接查（网络在工作线程，结果回主线程）。"""
+        if self._balance_busy:
+            return
+        if not balance_direct.available(self.cfg):
+            self.status.emit("[余额] 读不到 dsh 登录凭据，查不了（先 dsh 登录一次）")
+            return
+        self._balance_busy = True
+        cfg = self.cfg
+
+        def job() -> None:
+            try:
+                state = balance_direct.query(cfg)
+            except Exception as exc:  # noqa: BLE001  任何意外都只影响这一次刷新
+                state = {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
+            finally:
+                self._balance_busy = False
+            self._balance_done.balance.emit(state)
+
+        threading.Thread(target=job, name="balance-direct", daemon=True).start()
 
     def _auto_whisper(self) -> None:
         if self.whisper_ready:
@@ -624,6 +727,7 @@ class EventDirector(QObject):
 
 
 class _Signals(QObject):
-    """跨线程回主线程的小信道（AI 请求在工作线程里跑）。"""
+    """跨线程回主线程的小信道（AI 请求 / 直连查余额都在工作线程里跑）。"""
 
     done = Signal(str, str, str)
+    balance = Signal(object)
