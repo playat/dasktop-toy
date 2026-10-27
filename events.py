@@ -422,7 +422,7 @@ class EventDirector(QObject):
             self._ai_say(pet_id, kind="whisper")
             return
         if not silent and not key:
-            self.say(pet_id, "（没有 DSH、也没配本机模型，只能比划不能说话）", duration_ms=4000)
+            self.say(pet_id, "（还没接上模型，只能比划不能说话）", duration_ms=4000)
 
     def chat(self, pet_id: str | None, text: str) -> None:
         """对桌宠说一句话。"""
@@ -502,60 +502,68 @@ class EventDirector(QObject):
     # ---------------- 菜单入口 ----------------
 
     def menu_actions(self, pet_id: str | None = None) -> list[QAction]:
-        """右键菜单里的「说话」一块；什么都没有时返回空列表（菜单不显示这一项）。"""
+        """右键菜单根上的几个直接入口：碎碎念 / 说句话… / 刷新余额。
+
+        以前它们塞在「说话」子菜单里（点两下才够得着），现在平铺到根菜单。
+        """
+        acts: list[QAction] = []
+
+        whisper_act = QAction("碎碎念", None)
+        whisper_act.setToolTip(
+            "让它自己说一句"
+            if self.whisper_ready
+            else "没配本机模型，只在桌面上比划一段碎碎念"
+        )
+        whisper_act.triggered.connect(lambda _c=False: self.whisper(pet_id))
+        acts.append(whisper_act)
+
+        chat_act = QAction("说句话…", None)
+        chat_act.setToolTip(
+            "对它说一句，它会回你"
+            if self.whisper_ready
+            else "先在配置的 ai 段填 baseUrl + model，才有模型回话"
+        )
+        chat_act.triggered.connect(lambda _c=False: self._ask_and_chat(pet_id))
+        acts.append(chat_act)
+
+        balance_act = QAction("刷新余额", None)
+        balance_act.setEnabled(self.balance_ready)
+        if self.balance_ready:
+            balance_act.setToolTip(self._last_balance_text or "查一次当前余额")
+        else:
+            balance_act.setToolTip("本机没有 dsh 登录凭据")
+        balance_act.triggered.connect(lambda _c=False: self.refresh_balance())
+        acts.append(balance_act)
+
+        return acts
+
+    def meme_menu(self, pet_id: str | None = None) -> QMenu | None:
+        """「动作 → 表情包」子菜单；一张图都没有时返回 None（不占位置）。"""
         from PySide6.QtWidgets import QMenu
 
         from menu import MENU_QSS
 
-        say_menu = QMenu("说话", None)
-        say_menu.setStyleSheet(MENU_QSS)
-        say_menu.setToolTipsVisible(True)
-        self._keep_menus = [say_menu, *self._keep_menus][:4]
+        self.memes.scan()
+        if not len(self.memes):
+            return None
 
-        whisper_act = QAction("碎碎念", say_menu)
-        whisper_act.setEnabled(self.whisper_ready)
-        whisper_act.setToolTip(
-            "让桌宠说一句（DSH 的模型 / 本机模型）" if self.whisper_ready else "没找到 DSH，也没配本机模型"
-        )
-        whisper_act.triggered.connect(lambda _c=False: self.whisper(pet_id))
-        say_menu.addAction(whisper_act)
+        meme_menu = QMenu("表情包", None)
+        meme_menu.setStyleSheet(MENU_QSS)
+        meme_menu.setToolTipsVisible(True)
+        self._keep_menus = [meme_menu, *self._keep_menus][:4]
 
-        chat_act = QAction("说句话…", say_menu)
-        chat_act.setEnabled(self.whisper_ready)
-        chat_act.triggered.connect(lambda _c=False: self._ask_and_chat(pet_id))
-        say_menu.addAction(chat_act)
-
-        if len(self.memes):
-            meme_menu = QMenu("表情包", say_menu)
-            meme_menu.setStyleSheet(MENU_QSS)
-            meme_menu.setToolTipsVisible(True)
-            random_act = QAction(f"随机一张（共 {len(self.memes)} 张）", meme_menu)
-            random_act.triggered.connect(lambda _c=False: self.show_meme(pet_id))
-            meme_menu.addAction(random_act)
-            meme_menu.addSeparator()
-            for name in self.memes.names:
-                act = QAction(name, meme_menu)
-                desc = self.memes.describe(name)
-                if desc:
-                    act.setToolTip(desc)
-                act.triggered.connect(lambda _c=False, n=name: self.show_meme(pet_id, n))
-                meme_menu.addAction(act)
-            say_menu.addMenu(meme_menu)
-
-        if self.balance_ready:
-            say_menu.addSeparator()
-            if self._last_balance_text:
-                shown = self._last_balance_text
-                label = shown if len(shown) <= 30 else shown[:29] + "…"
-                info_act = QAction(label, say_menu)   # 文案自己就带「余额」开头，不再重复加前缀
-                info_act.setEnabled(False)
-                info_act.setToolTip(shown)
-                say_menu.addAction(info_act)
-            balance_act = QAction("刷新余额", say_menu)
-            balance_act.triggered.connect(lambda _c=False: self.refresh_balance())
-            say_menu.addAction(balance_act)
-
-        return [say_menu.menuAction()]
+        random_act = QAction(f"随机一张（共 {len(self.memes)} 张）", meme_menu)
+        random_act.triggered.connect(lambda _c=False: self.show_meme(pet_id))
+        meme_menu.addAction(random_act)
+        meme_menu.addSeparator()
+        for name in self.memes.names:
+            act = QAction(name, meme_menu)
+            desc = self.memes.describe(name)
+            if desc:
+                act.setToolTip(desc)
+            act.triggered.connect(lambda _c=False, n=name: self.show_meme(pet_id, n))
+            meme_menu.addAction(act)
+        return meme_menu
 
     def _ask_and_chat(self, pet_id: str | None) -> None:
         text, ok = QInputDialog.getText(None, "对桌宠说", "说点什么：")

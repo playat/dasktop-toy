@@ -19,12 +19,16 @@
 配置里的 `animations` 池子仍然管**自动行为**（待机播什么、点一下播什么、随机走位），
 但跟菜单内容彻底无关了。
 
-    说话 ┬ 碎碎念 / 说句话… / 表情包（由 events.EventDirector 注入，没能力时整块不出现）
+    动作 ┬ 表情包 ┬ 随机一张 / 各张图    ← events.EventDirector 注入，没有图就不出现
+         └ 动画目录…
     大小 ┬ 大 / 中 / 小 / 迷你
     固定原地（勾选）
     回到初始位置
     重载配置
+    碎碎念 / 说句话… / 刷新余额          ← events.EventDirector 注入（`extra`）
     退出
+
+「动作」里的注入项走 `action_extra`（可以是 QAction，也可以是整块 QMenu）。
 
 点播不受 fixedEnabled 影响——这是用户主动触发，和 Electron 版语义一致。
 """
@@ -151,6 +155,7 @@ def build_menu(
     on_reload: Callable[[], None],
     on_quit: Callable[[], None],
     extra: list[QAction] | None = None,
+    action_extra: list[QAction | QMenu] | None = None,
 ) -> QMenu:
     menu = QMenu(parent)
     menu.setStyleSheet(MENU_QSS)
@@ -159,7 +164,16 @@ def build_menu(
     # ---- 动作（每次开菜单都重扫 assets/webm，目录即分类）----
     anims.scan()
     action_menu = _submenu(menu, "动作")
-    if _add_actions(action_menu, anims.tree(), on_play) == 0:
+    # 别的模块注入到「动作」里的条目（目前是表情包子菜单），排在动画目录前面
+    for item in action_extra or []:
+        if isinstance(item, QMenu):
+            action_menu.addMenu(item)
+        else:
+            action_menu.addAction(item)
+    if action_extra:
+        action_menu.addSeparator()
+
+    if _add_actions(action_menu, anims.tree(), on_play) == 0 and not action_extra:
         hint = QAction("（assets/webm 里没有素材）", action_menu)
         hint.setEnabled(False)
         action_menu.addAction(hint)
