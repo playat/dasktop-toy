@@ -13,10 +13,13 @@
 //   其余所有素材                 → 随机小动作池
 //
 //   目录名**在任意层级都认**（`小动作/待机/x.webm` 也算待机），所以可以把特殊素材
-//   收进分类目录里不影响归类。右键菜单则完整照搬目录树，两者的分组互不干扰。
+//   收进分类目录里不影响归类。右键「动作」菜单照搬目录树（最前面另加一块表情包），两者互不干扰。
 //
-// 本文件现在只管三件事：窗口/物理手感、走位参数、随机链的掷骰比例。
-// 原 DSH 插件那些依赖 AI 与会话事件的字段，都在文件末尾的注释块里备查。
+// 本文件的顶层键：
+//   pets / physics / moves / noMirror / animationWeights / confineToScreen  窗口与手感
+//   font / events / eventsRefreshSec / workStatusTexts / memes              说话与联动
+//   dsh（含余额直连参数）/ session（会话日志观察）/ ai（本机模型）            数据源
+// 仍然没有实现的字段在文件末尾的块注释里备查（代码不读）。
 {
   // ===================== 拖拽抛掷：锁定在当前屏幕（根字段，不属于 physics） =====================
   // 多屏用户：true = 甩出去的宠物只在松手时所在那块屏幕内弹（屏缝当墙，不飞到隔壁屏）；
@@ -75,16 +78,16 @@
 
   // ===================== 点击音效 / 事件联动开关 =====================
   // 素材位置：assets/sound/click-duck.wav、pic/notify-*.png、memes/*.png
-  // 下面这些开关只管「允不允许」，真有没有数据看 dsh / ai 那一节。
+  // 下面这些开关只管「允不允许」，真有没有数据看 dsh / session / ai 那几节。
   "events": {
     "clickSoundEnabled": false,   // 点一下「啾」一声（100ms 内连点只响一次，多开不叠音）
-    "workStatusEnabled": true,    // 工作状态档位动画 + 气泡文案（需要 DSH 会话事件）
-    "balanceEnabled": true,       // 余额档位动画 + 气泡（需要 DSH 的余额数据）
-    "notificationsEnabled": true, // DSH 的 turn/end 之类事件弹气泡
+    "workStatusEnabled": true,    // 工作状态档位动画 + 气泡文案（优先读会话日志，DSH 事件作备份）
+    "balanceEnabled": true,       // 余额六档动画 + 气泡（走 balance.py 直连，只要本机凭据在）
+    "notificationsEnabled": true, // 完成/出错/审批之类的一次性提醒气泡（带 pic/notify-*.png 图标）
     "whisperEnabled": true,       // 定时碎碎念（需要 DSH 的模型 或 本机 ai）
-    "chatEnabled": true           // 右键「说话 → 说句话…」
+    "chatEnabled": true           // 根菜单「说句话…」（多轮对话，与碎碎念共用一套模型）
   },
-  // 事件周期（秒）：balance 只对 DSH 生效，whisper 没有模型时不会真的发请求。
+  // 事件周期（秒）：balance 走直连、到点就查；whisper 没有模型时不会真的发请求。
   "eventsRefreshSec": { "balance": 1800, "whisper": 300 },
   // 工作状态气泡文案：外层索引 = 档位（0 思考 1 干活 2 整理 3 等确认 4 完成 5 出错），
   // 每档多个备选句随机抽一句。省略整个字段 = 不弹文字，只播动画。
@@ -231,7 +234,8 @@
 
 /* ======================= 仍未实现的字段 · 备查 =======================
    独立版已经补回来的（正文里都有，代码真的会读）：文字气泡 + 字体、表情包、
-   工作状态文案与周期、点击音效、系统通知、DSH 对接、本机大模型。
+   工作状态文案与周期、点击音效、通知气泡（pic/notify-*.png）、DSH 对接、本机大模型、
+   会话日志观察（session）、余额直连（dsh.balance*）。
 
    下面这些仍然没有对应实现，留作将来扩展的参考：
 

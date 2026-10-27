@@ -6,16 +6,15 @@ PySide6 桌宠（零 Electron / 零 Node），重构自插件 PC2005-cloud/dsh-p
 ## 目录分工（2026-10-26 定档）
 
 - `assets/` = **项目文件**（进 git）：素材的源，生成工具写这里，源码模式读这里。
-- `dist/` = **构建产物**（不进 git）：build 前把 assets 镜像过去，删了能重建。平铺：`DshPet.exe` + `_internal/` + `config.jsonc` + `assets/`。
+- `dist/` = **构建产物**（不进 git）：build 前把 assets 镜像过去，删了能重建。平铺：exe + `_internal/` + `config.jsonc` + `assets/`。
 
-代码：`main/window/player/video/config/physics/menu/tray.py` + `events/dsh/ai/bubble/memes/session/balance.py`
-+ `config.jsonc` + `make_pet_webm.py`/`build.py` + 4 个 .cmd。素材：`assets/webm`（108，进 git）/ `memes`（27）/ `pic` / `sound` / `fonts`。
+代码分层见 `README.md` 的目录表（运行时 / 事件 / 素材工具三层）。
 
 ## 命令（根目录）
 
 `setup-pet.cmd` / `run-pet.cmd` / `make-webm.cmd` / `build.cmd`；
 `.venv\Scripts\python.exe session.py --all`（会话一览）、`balance.py`（余额 CLI 全参数保留）。
-`make_pet_webm.py`：`--src` 默认 `video/src` → 写 `assets/webm`（递归扫 stem 判增量），`dist/assets` 在时顺手 sync。
+`make_pet_webm.py`：`--src` 默认 `video/src` → 写 `assets/webm`（递归扫 stem 判增量）。
 
 ## 运行时要点
 
@@ -24,7 +23,7 @@ PySide6 桌宠（零 Electron / 零 Node），重构自插件 PC2005-cloud/dsh-p
 - `main.py:ASSETS = _assets_dir()`：探 `HERE/assets`（有 webm 才算）→ `HERE/dist/assets` 兜底。
 - 窗口 = `pets[0].size`（462，16:9）→ 462×260；状态机 idle/action/turn/move/drag/throw/click。
   每只宠物独立解码线程 + 独立 fixedEnabled；菜单「大小」不写回配置（重启回 462）。
-- 落地挤压锚点 = **水平中心 + 脚底**；petCollision = `collidePet` 直译（等质量 e≈1 换动量）。
+- 落地挤压锚点 = **水平中心 + 脚底**；petCollision = `collidePet` 直译。
 
 ## 菜单结构
 
@@ -40,7 +39,6 @@ PySide6 桌宠（零 Electron / 零 Node），重构自插件 PC2005-cloud/dsh-p
   带 `x-dsh-auth-token` 请求 `{issuer}/api/v0/users/get_user_summary`。**凭据等同密码**：只读不打印。
 - 结果包 `{ok, shape:"money", data:{wallets:[{currency,total,fullBalance}]}, text}`；`total`=充值+赠金，
   `fullBalance`=`dsh.balanceFull`（默认 100，0=不折算），复用 `balance_percent → balance_event_index` 六档。
-
 ## 会话状态（日志观察）
 
 - `session.py` 第一部分（原 pet_state.py）：读 `$DSH_HOME/sessions/*/session-*/session.*.jsonl*`，
@@ -49,7 +47,7 @@ PySide6 桌宠（零 Electron / 零 Node），重构自插件 PC2005-cloud/dsh-p
   **触发规则六条写在文件头，改行为先读那段**：只认 `(会话,status)` 跃迁；`thinking↔tool` 稳 `minHoldMs` 才认；
   首次/换会话只对齐动画不弹气泡；notice 只播一次；催促有上限且忙碌内部一切换就清零。
 - 多会话怎么选：glob 按 mtime 取近 72h 前 `maxSessions`（8）个，目录扫描缓存 3s；每个 path 一个 `SessionFold`
-  各自记 offset（**只读新增字节**）；primary = 非 idle + 最近事件；Policy 再按 3(等审批/回答)/2(thinking/tool)/1(闲)
+  各自记 offset（**只读新增字节**）；primary = 非 idle + 最近事件；Policy 再按 3(等审批/回答)/2(忙)/1(闲)
   挑焦点，**同档粘住当前会话**，只有更高档才切，避免两只抢动画。notice 不分主次，动画按 `_PRIO` 打架（出错>庆祝>等你）。
 - `events.on_work_status()` 在 `session_ready` 时直接 return（日志优先，DSH workStatus 让位）。
   窗口 `set_status()/play_effect()`：状态动画播完自动重播，拖拽/飞行/占用时挂起。
@@ -58,5 +56,5 @@ PySide6 桌宠（零 Electron / 零 Node），重构自插件 PC2005-cloud/dsh-p
 ## 打包
 
 - onedir → `--distpath build/pkg`，再 `flatten()` 搬 exe+`_internal` 到 `dist/` 根；素材/配置**外置**在 exe 同级。
-- `sync_assets()` → `_mirror(SRC, dist/assets)`：大小+mtime 一致跳过，多余删掉；`--clean` 不清 `dist/assets`；
+- `sync_assets()` → `_mirror()`：大小+mtime 一致跳过，多余删掉；`--clean` 不清 `dist/assets`；
   老布局 `drop_old_layout()` 由 `_covers()` 确认后才删。
