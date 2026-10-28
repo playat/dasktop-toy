@@ -9,7 +9,8 @@
     throw → 松手后抛掷：重力 + 边缘反弹 + 落地摩擦，静止后歇一下
     click → 点击回应，播完歇一会儿
 
-「歇一会儿」= 画面定格在素材末帧（所有动作视频都要求首尾回到标准站姿，所以就是站着不动），
+「歇一会儿」= 接着播待机动画（循环），直到时间到了才切下一个动作 —— 动作视频都要求
+首尾回到标准站姿，所以从末帧切进待机是平滑的，看着像站着等你而不是画面卡住。
 时长见 config.jsonc 的 animGap：不等长随机 + 动作后加长 + 偶尔发呆，再按当前 CPU 占用拉长
 （机器忙的时候宠物更安静）。原版是播完立刻接下一个，看着像在赶场。
 
@@ -315,10 +316,41 @@ class PetWindow(QWidget):
         # 有「持续状态」就接着播它（工作状态是持续的，不能播一遍就回去发呆）
         if self._status_anim is not None and self._apply_status():
             return
-        # 否则先歇着，过一会儿再掷骰（kind 决定歇多久）
-        self._schedule_next(self.state)
+        # 否则换成待机动画等着，过一会儿再掷骰（kind 决定等多久）
+        self._idle_then(self.state)
 
     # ---------- 动作之间的停顿 ----------
+
+    def _idle_then(self, kind: str) -> None:
+        """「等下一个动作」这段先用待机循环填上，再排下一次掷骰。
+
+        顺序不能反：`_play()` 会停掉待定的 `_gap_timer`，所以必须先切待机、
+        再起计时器，否则计时器刚起就被掐掉，宠物会永远待机下去。
+        """
+        if not self._cfg.anim_gap.enabled:
+            self._roll_next()  # 关掉间隔 = 老的无缝连播
+            return
+        self._hold_idle()
+        self._schedule_next(kind)
+
+    def _hold_idle(self) -> None:
+        """等待期间播待机动画（循环），别定格在上一段素材的末帧。
+
+        所有动作素材首尾都是标准站姿，所以「末帧 → 待机首帧」是平滑的；
+        待机素材本身够长且可循环，等多久画面都在动，看着像站着等你，
+        而不是像卡住/掉帧。被拖、被甩、被第三方占用时不切 —— 那几帧本身有意义。
+        """
+        if self.external_lock or self.state in ("drag", "throw"):
+            return
+        picked = self._anims.idle()
+        if picked is None:
+            return
+        name, path = picked
+        # 已经在循环播同一段待机时 play() 会拒绝（正好不打断它），但状态还是得归位到 idle
+        if self._play(name, path, loop=True, state="idle"):
+            print(f"[anim] hold → {name}", flush=True)
+        else:
+            self.state = "idle"
 
     def _schedule_next(self, kind: str = "idle") -> None:
         """排下一次掷骰。kind = 刚播完的是什么，用来决定歇多久。"""
@@ -445,7 +477,7 @@ class PetWindow(QWidget):
         if t >= dur:
             self.move(round(self._move_target), self.y())
             self.state = "idle"
-            self._schedule_next("move")
+            self._idle_then("move")
             return
         travel = max(0.1, dur - lead - tail)
         if t <= lead:
@@ -502,7 +534,7 @@ class PetWindow(QWidget):
         if at_rest:
             self._throw = None
             self.state = "idle"
-            self._schedule_next("throw")
+            self._idle_then("throw")
 
     def _bounce_off_peers(self, state: physics.ThrowState) -> physics.ThrowState:
         """本帧自己被甩出去时撞到别的宠物 → 改写自己的速度 + 通知对方以新初速飞出去。
@@ -784,7 +816,7 @@ class PetWindow(QWidget):
                 if self._play(name, path, loop=False, state="click", on_finish=self._after_oneshot):
                     print(f"[anim] click → {name}", flush=True)
             else:
-                self._schedule_next("click")  # 没有「点击回应」素材：点完也照常歇一会儿
+                self._idle_then("click")  # 没有「点击回应」素材：点完也照常歇一会儿
         self._trail.clear()
         event.accept()
 

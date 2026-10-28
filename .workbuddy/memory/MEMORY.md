@@ -27,12 +27,14 @@ PySide6 桌宠（零 Electron / 零 Node），重构自插件 PC2005-cloud/dsh-p
 - 窗口 = `pets[0].size`（462，16:9）→ 462×260；状态机 idle/action/turn/move/drag/throw/click。
   每只宠物独立解码线程 + 独立 fixedEnabled；菜单「大小」不写回配置（重启回 462）。
 - 落地挤压锚点 = **水平中心 + 脚底**；petCollision = `collidePet` 直译。
-- **动作之间有停顿**（`animGap`）：`_after_oneshot` 不再直接 `_roll_next`，而是 `_schedule_next(kind)` 起一个
-  single-shot `_gap_timer`；静止期间画面**定格在素材末帧**（素材首尾都是标准站姿，等于站着不动）。
+- **动作之间有停顿**（`animGap`）：`_after_oneshot` 不再直接 `_roll_next`，而是 `_idle_then(kind)`：
+  **先 `_hold_idle()` 播待机循环、再 `_schedule_next(kind)` 起 single-shot `_gap_timer`**
+  （顺序不能反：`_play()` 会 `_gap_timer.stop()`，反了计时器刚起就被掐）。等多久画面都在动，不再定格。
   间隔 = `random(minMs,maxMs)` + 动作后 `actionExtraMs×U(0.35,1)` + `longPauseChance` 概率加 `longPauseMs×U(0.5,1)`，
   再 `×(1+loadInfluence×负载)`。入口：`_drive_move` 走 `"move"`、`_drive_throw` 落定走 `"throw"`、
-  `mouseRelease` 没点击素材走 `"click"`；**`_play()` 里 `_gap_timer.stop()`**（新动画上场就作废待定掷骰）。
-  status 持续动画那条路不加间隔（走完立刻重播）。`set_external_lock(False)` 会补排一次，避免解锁后僵住。
+  `mouseRelease` 没点击素材走 `"click"`。`_roll_next` 的 drag/throw 分支和 `_on_gap_elapsed`/`set_external_lock(False)`
+  仍走裸 `_schedule_next`（那时画面本身有意义，不该切待机）。
+  status 持续动画那条路不加间隔（走完立刻重播）。
 
 ## 菜单结构
 
