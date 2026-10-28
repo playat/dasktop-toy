@@ -3,69 +3,65 @@
 PySide6 桌宠（零 Electron / 零 Node），重构自插件 PC2005-cloud/dsh-pet。工作区平铺，环境一份 `.venv/`。
 **踩过的坑单独放 `GOTCHAS.md`，动手改代码前先扫一眼。**
 
-## 目录分工（2026-10-26 定档）
+## 目录分工
 
 - `assets/` = **项目文件**（进 git）：素材的源，生成工具写这里，源码模式读这里。
-- `dist/` = **构建产物**（不进 git）：build 前把 assets 镜像过去，删了能重建。平铺：exe + `_internal/` + `config.jsonc` + `assets/`。
+- `dist/` = **构建产物**（不进 git）：平铺 exe + `_internal/` + `config.jsonc` + `assets/`，删了能重建。
 
-代码分层见 `README.md` 的目录表（运行时 / 事件 / 素材工具三层）。
+分层见 `README.md` 目录表。
 
 ## 命令（根目录）
 
-**只剩一个批处理** `run-pet.cmd`（2026-10-28 起）：启动前依次自检 .venv 是否存在 → venv 里的 python 能否跑 →
-四个依赖（PySide6/av/numpy/zstandard）缺哪个，缺就打印补装命令退出。其余**一律 python 命令**：
-`.venv\Scripts\python.exe build.py`（只编译）、`make_pet_webm.py`、`session.py --all`（会话一览）、
-`balance.py`（余额 CLI）。`setup-pet.cmd` / `make-webm.cmd` / `build.cmd` 已删，环境由用户按 README 自己建。
-`build.py` 不再自动装 PyInstaller（缺了就报错给命令）。
-`make_pet_webm.py`：`--src` 默认 `video/src` → 写 `assets/webm`（递归扫 stem 判增量）。
+`run-pet.cmd` 是**唯一批处理**：依次自检 .venv 是否存在 → venv 里 python 能否跑 → 四个依赖
+（PySide6/av/numpy/zstandard）缺哪个，缺就打印补装命令退出。其余**一律 python 命令**：
+`build.py`（只编译，不自动装 PyInstaller）、`make_pet_webm.py`、`session.py --all`、`balance.py`。
+`setup-pet.cmd` / `make-webm.cmd` / `build.cmd` 已删。`make_pet_webm.py` 默认 `video/src` → `assets/webm`。
+
+## 素材链抠像（2026-10-28 收紧）
+
+上游 `chroma_step02.py` 是「色相 70~170 + sat≥0.15」，照抄会留一圈灰边 + 水印位灰白点。`key_frame` 两处改动：
+- `SAT_MIN` **0.15→0.07** 且要求 **`G ≥ max(R,B)+2`**。白/浅灰角色同样低饱和，但绿不是最大通道，不会被啃；
+  两条配合才能既吃灰边又不掏白裙子。
+- `_strip_watermark()`：豆包在左上角另打一串白字，mask 只盖了底部。按「亮 val>0.70 + 无彩 sat<0.13 +
+  角色外接框外 + 单块扁长(宽≥2.5×高、高≤12%画面) + 面积<2%」逐帧认出，直接判 alpha=0。
+- 上游只做到「清除 99.6%」，后来**全量改用 PR 手工抠像**，别指望自动方案完美。
+- 改判据后要 `--force` 重跑才生效（覆盖 `assets/webm` 同名文件）。
 
 ## 运行时要点
 
-- **右键「动作」菜单不读配置**：`AnimationSet.scan()` 用 rglob 扫 `ASSETS/webm`，键=相对路径去后缀；`_add_actions` 递归成子菜单，每次开菜单都 scan，单层 >30 自动分页。`animations.*` 只管自动行为。
-- `path_of()`：先精确匹配键，再按 stem 兜底（同名取第一）。
-- `main.py:ASSETS = _assets_dir()`：探 `HERE/assets`（有 webm 才算）→ `HERE/dist/assets` 兜底。
-- 窗口 = `pets[0].size`（462，16:9）→ 462×260；状态机 idle/action/turn/move/drag/throw/click。
-  每只宠物独立解码线程 + 独立 fixedEnabled；菜单「大小」不写回配置（重启回 462）。
-- 落地挤压锚点 = **水平中心 + 脚底**；petCollision = `collidePet` 直译。
-- **动作之间有停顿**（`animGap`）：`_after_oneshot` 不再直接 `_roll_next`，而是 `_idle_then(kind)`：
-  **先 `_hold_idle()` 播待机循环、再 `_schedule_next(kind)` 起 single-shot `_gap_timer`**
-  （顺序不能反：`_play()` 会 `_gap_timer.stop()`，反了计时器刚起就被掐）。等多久画面都在动，不再定格。
-  间隔 = `random(minMs,maxMs)` + 动作后 `actionExtraMs×U(0.35,1)` + `longPauseChance` 概率加 `longPauseMs×U(0.5,1)`，
-  再 `×(1+loadInfluence×负载)`。入口：`_drive_move` 走 `"move"`、`_drive_throw` 落定走 `"throw"`、
-  `mouseRelease` 没点击素材走 `"click"`。`_roll_next` 的 drag/throw 分支和 `_on_gap_elapsed`/`set_external_lock(False)`
-  仍走裸 `_schedule_next`（那时画面本身有意义，不该切待机）。
-  status 持续动画那条路不加间隔（走完立刻重播）。
+- 右键「动作」菜单**不读配置**：`AnimationSet.scan()` 每次开菜单都 rglob 扫 `ASSETS/webm`，键=相对路径去后缀，
+  单层 >30 自动分页。`path_of()` 先精确匹配再按 stem 兜底。`ASSETS` 探 `HERE/assets` → `HERE/dist/assets`。
+- 窗口 = `pets[0].size`（462）→ 462×260；状态机 idle/action/turn/move/drag/throw/click；
+  每只独立解码线程 + fixedEnabled；「大小」不写回配置。落地挤压锚点 = 水平中心 + 脚底。
+- **动作之间停顿**（`animGap`）：`_after_oneshot` 走 `_idle_then(kind)` = **先 `_hold_idle()` 播待机循环、
+  再 `_schedule_next(kind)` 起 `_gap_timer`**（顺序不能反：`_play()` 会 `_gap_timer.stop()`）。
+  间隔 = `random(min,max)` + 动作后 `actionExtraMs` + 偶尔 `longPauseMs`，再 `×(1+loadInfluence×负载)`。
+  drag/throw 分支与 `_on_gap_elapsed`/`set_external_lock(False)` 仍走裸 `_schedule_next`；status 那条不加间隔。
 
 ## 菜单结构
 
-根：`动作`（第一项是**表情包子菜单**，`events.meme_menu()` 注入）/ `大小` / `固定原地` / `回到初始位置` / `重载配置` /
-`碎碎念` / `说句话…` / `刷新余额` / `再来一只` / `退出`。
-`build_menu(..., extra=, action_extra=)`：extra 平铺根，action_extra 塞「动作」子菜单。**已删 `DSH：未连接…` 与 `会话：…` 两行灰字**。
+根：`动作`（首项是表情包子菜单，`events.meme_menu()`）/ 大小 / 固定原地 / 回到初始位置 / 重载配置 /
+碎碎念 / 说句话… / 刷新余额 / 再来一只 / 退出。`build_menu(extra=, action_extra=)`。
 
-## 余额（唯一通道：直连，不看 DSH）
+## 余额（只走直连，不看 DSH）
 
-- `events.refresh_balance()` 只调 `balance.py`，无回退；DshBridge 的 balance 信号/方法/分发已删；
-  `balance_ready = available(cfg)`（只看凭据在不在）。查询在工作线程，`Signal(object)` 回主线程，`_balance_busy` 防重入。
-- 读 `$DSH_HOME/.credentials.yaml` 的 `records."deepseek-account-platform/default".payload.token`，
-  带 `x-dsh-auth-token` 请求 `{issuer}/api/v0/users/get_user_summary`。**凭据等同密码**：只读不打印。
-- 结果包 `{ok, shape:"money", data:{wallets:[{currency,total,fullBalance}]}, text}`；`total`=充值+赠金，
-  `fullBalance`=`dsh.balanceFull`（默认 100，0=不折算），复用 `balance_percent → balance_event_index` 六档。
+- `events.refresh_balance()` 只调 `balance.py`；DshBridge 的 balance 信号/方法/分发已删；
+  `balance_ready = available(cfg)`。工作线程 + `Signal` 回主线程，`_balance_busy` 防重入。
+- 读 `$DSH_HOME/.credentials.yaml` 的 `deepseek-account-platform/default` token，带 `x-dsh-auth-token`
+  请求 `{issuer}/api/v0/users/get_user_summary`。**凭据等同密码：只读不打印**。
+- 结果 `{ok, shape:"money", data:{wallets:[{currency,total,fullBalance}]}}`；
+  `fullBalance`=`dsh.balanceFull`（默认 100，0=不折算），复用六档表情。
+
 ## 会话状态（日志观察）
 
 - `session.py` 第一部分（原 pet_state.py）：读 `$DSH_HOME/sessions/*/session-*/session.*.jsonl*`，
-  zstd 多帧**增量**解码 → `idle/thinking/tool/waiting_approval/waiting_answer` + notices。
-- 第二部分：`SessionWatcher`（线程+Signal）+ `ReactionPolicy`（纯逻辑 `plan(snapshot)`）。
-  **触发规则六条写在文件头，改行为先读那段**：只认 `(会话,status)` 跃迁；`thinking↔tool` 稳 `minHoldMs` 才认；
-  首次/换会话只对齐动画不弹气泡；notice 只播一次；催促有上限且忙碌内部一切换就清零。
-- 多会话怎么选：glob 按 mtime 取近 72h 前 `maxSessions`（8）个，目录扫描缓存 3s；每个 path 一个 `SessionFold`
-  各自记 offset（**只读新增字节**）；primary = 非 idle + 最近事件；Policy 再按 3(等审批/回答)/2(忙)/1(闲)
-  挑焦点，**同档粘住当前会话**，只有更高档才切，避免两只抢动画。notice 不分主次，动画按 `_PRIO` 打架（出错>庆祝>等你）。
-- `events.on_work_status()` 在 `session_ready` 时直接 return（日志优先，DSH workStatus 让位）。
-  窗口 `set_status()/play_effect()`：状态动画播完自动重播，拖拽/飞行/占用时挂起。
-- 依赖 `zstandard`（requirements + build `--collect-all zstandard`）。
+  zstd 多帧**增量**解码 → idle/thinking/tool/waiting_approval/waiting_answer + notices。
+`SessionWatcher`（线程+Signal）+ `ReactionPolicy.plan()`；**六条触发规则在文件头，改行为先读**。
+- 多会话：glob 按 mtime 取近 72h 前 8 个（目录扫描缓存 3s），每个 path 一个 `SessionFold` 各记 offset
+  （**只读新增字节**）；primary = 非 idle + 最近事件；focus 按 3/2/1 挑且**同档粘住**，避免两只抢动画。
+  notice 不分主次，`_PRIO` 出错>庆祝>等你。依赖 `zstandard`（build 要 `--collect-all zstandard`）。
 
 ## 打包
 
-- onedir → `--distpath build/pkg`，再 `flatten()` 搬 exe+`_internal` 到 `dist/` 根；素材/配置**外置**在 exe 同级。
-- `sync_assets()` → `_mirror()`：大小+mtime 一致跳过，多余删掉；`--clean` 不清 `dist/assets`；
-  老布局 `drop_old_layout()` 由 `_covers()` 确认后才删。
+- onedir → `--distpath build/pkg`，再 `flatten()` 搬 exe+`_internal` 到 `dist/` 根；素材/配置**外置**。
+- `sync_assets()` → `_mirror()`：大小+mtime 一致跳过，多余删掉；`--clean` 不清 `dist/assets`。

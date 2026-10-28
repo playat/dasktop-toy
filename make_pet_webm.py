@@ -6,15 +6,19 @@
 这里把**同一套算法**合并成「解码 → 处理 → 编码」的单遍管线，不落中间文件。
 四步一一对应原脚本，没有改判据：
 
-  1. 去水印（watermark_step01 / fill_nn）
-     原理：mask 里标白的像素，用周围非水印像素的颜色填掉。
+  1. 去水印（watermark_step01 / fill_nn + 自动识别平台水印）
+     mask 路线：mask 里标白的像素，用周围非水印像素的颜色填掉。
      原版用 scipy 取「第 k 近非水印像素」；这里改成：按行段切成小块 →
      洞先膨胀几 px → 再沿「明显偏离底色」的像素自适应长开 → 洞内做上下左右
      最近像素的距离加权插值。纯 numpy，不需要 scipy。
      关键点：遮罩只盖住笔画实心部分，边缘那圈半透明像素不一起挖掉就会留一圈淡字影
      （就是「去不干净」）。也不能整帧取并集 —— 遮罩底部有整行白线，并集等于整个画面。
+     自动路线（_strip_watermark）：mask 只盖住部分水印时（常见于左上角那串字），
+     按「亮 + 无彩 + 扁长 + 小 + 不在角色身上」认出白字块，直接判透明。
   2. 抠像（chroma_step02）
-     只把「色相 70~170° + 饱和度 ≥0.15 + 明度 ≥0.15」判为背景 → alpha 0，色相两端 6° 羽化。
+     只把「色相 70~170° + 饱和度 ≥0.07 + 明度 ≥0.15 + 绿通道占优」判为背景 → alpha 0，
+     色相两端 6° 羽化。饱和度下限比上游（0.15）低，否则绿幕被提亮处、水印填充处
+     会留下灰白边/灰白点；「绿通道占优」保证白/浅灰角色不被误抠。
      刻意不用 chromakey 的 YUV 距离：蓝色/白色角色会被误抠。
   3. 归一化（normalize_step03）
      首尾各 5 帧当站立姿态，量出站立高度 / 水平中位中心 / 脚底 y，再整帧缩放到
@@ -78,9 +82,15 @@ STANDING_H = 900.0 * CANVAS_W / 2160.0  # 266.67 = 原链路 2160 画布站立 9
 FPS = 24
 CRF = 40
 
-# ---- 抠像判据（chroma_step02.py 原值） ----
+# ---- 抠像判据 ----
+# 上游 chroma_step02.py 用「色相 + 饱和度 ≥0.15 + 明度 ≥0.15」。饱和度下限太松了：
+# 绿幕被角色光晕提亮、或水印被 4 向插值填成淡绿之后，饱和度会掉到 0.08~0.10，
+# 原判据把这些像素留成灰白边/灰白点（角色轮廓一圈、水印位置一片）。
+# 这里降到 0.07，并补一条「绿通道确实占优」——低饱和的白/浅灰角色绿不是最大通道，
+# 不会被削，所以两者可以同时用。
 GREEN_HUE_MIN, GREEN_HUE_MAX = 70.0, 170.0
-SAT_MIN, VAL_MIN = 0.15, 0.15
+SAT_MIN, VAL_MIN = 0.07, 0.15
+GREEN_EXCESS_MIN = 2  # G 比 max(R,B) 至少高这么多才算「还是绿幕」
 HUE_FEATHER = 6.0
 
 # ---- 测量 ----
@@ -289,13 +299,64 @@ def _rgb_to_hsv(frame: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     return hue, sat, mx
 
 
+def _strip_watermark(alpha: np.ndarray, val: np.ndarray, sat: np.ndarray) -> np.ndarray:
+    """把「平台水印」直接判成透明，返回新的 alpha。
+
+    生成平台爱在画面上打一串半透明白字（豆包是左上、右下各一串，而且时有时无）。
+    这类像素很亮却没有颜色，抠像判据不会把它当绿幕，于是整块留成前景 ——
+    到桌面上就是一片灰白点；而去水印遮罩常常只盖住其中一处（本项目这份只盖了底部一条）。
+
+    四个条件一起判，宁可漏掉也不碰角色和特效：
+      1. 亮 + 低饱和（白字；绿幕是暗绿、角色是有颜色的实体）
+      2. 落在角色外接框之外
+      3. 单块扁长（宽 ≥ 2.5×高、高 ≤ 画面 12%）—— 横排文字的形状
+      4. 单块面积够小（< 2% 画面）—— 排除大片光斑/烟花/泡泡
+    """
+    h, w = alpha.shape
+    flat = (val > 0.70) & (sat < 0.13) & (alpha > 0)
+    if not flat.any():
+        return alpha
+
+    body = (alpha > 200) & (sat >= 0.13)
+    ys, xs = np.where(body)
+    if len(ys):  # 角色身上一律不动：白裙子、白发同样是「亮 + 低饱和」
+        flat[max(0, int(ys.min()) - 16): int(ys.max()) + 17,
+             max(0, int(xs.min()) - 16): int(xs.max()) + 17] = False
+    if not flat.any():
+        return alpha
+
+    out = alpha
+    for bx0, by0, bx1, by1, m in _split_regions(flat, pad=0):
+        bw, bh = bx1 - bx0, by1 - by0
+        area = int(m.sum())
+        if area < 150 or area > 0.02 * h * w:
+            continue
+        if bh > h * 0.12 or bw < bh * 2.5:
+            continue
+        if out is alpha:
+            out = alpha.copy()
+        out[by0:by1, bx0:bx1][m] = 0
+    return out
+
+
 def key_frame(rgb: np.ndarray) -> np.ndarray:
-    """绿幕 → alpha。返回 RGBA（uint8）。"""
+    """绿幕 → alpha。返回 RGBA（uint8）。
+
+    判据 = 色相在绿区 + 明度够 + 饱和度够 + **绿通道确实占优**。
+
+    两个改动都是为了灰边/灰点（见 SAT_MIN 那段注释）：
+    - 饱和度下限 0.15 → 0.07：吃掉「绿幕被提亮」和「水印填充成淡绿」的残留；
+    - 绿通道占优（G ≥ max(R,B)+2）：白/浅灰角色同样低饱和，但绿不是最大通道，
+      不会被削 —— 没有这条，白裙子会被啃掉一片。
+    """
     hue, sat, val = _rgb_to_hsv(rgb)
     lo, hi = GREEN_HUE_MIN - HUE_FEATHER, GREEN_HUE_MAX + HUE_FEATHER
     in_hue = np.clip((hue - lo) / HUE_FEATHER, 0, 1) * np.clip((hi - hue) / HUE_FEATHER, 0, 1)
-    bg = (sat >= SAT_MIN) & (val >= VAL_MIN) & (hue >= lo) & (hue <= hi)
+    f = rgb.astype(np.int16)
+    green = (f[..., 1] - np.maximum(f[..., 0], f[..., 2])) >= GREEN_EXCESS_MIN
+    bg = (sat >= SAT_MIN) & (val >= VAL_MIN) & (hue >= lo) & (hue <= hi) & green
     alpha = np.where(bg, (1.0 - in_hue) * 255.0, 255.0).astype(np.uint8)
+    alpha = _strip_watermark(alpha, val, sat)
     return np.dstack([rgb, alpha])
 
 
