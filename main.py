@@ -1,8 +1,9 @@
 """dsh-pet Python 桌面端 —— M3/M4：菜单 + 托盘 + 多开。
 
 用法（在工作区根目录）：
-    run-pet.cmd                         双击或命令行都行
-    .venv\\Scripts\\python.exe main.py    显式用工作区 venv
+    run-pet.cmd                          双击/命令行都行，会先自检 .venv 与依赖
+    .venv\\Scripts\\python.exe main.py     直接用项目自己的解释器跑
+    python main.py                       自己的环境里装齐依赖也能跑
 
 能力：透明窗口 + VP9-alpha 播放 + 动画链状态机（待机/随机动作/转向/走位）
       + 点击回应 + 拖拽 + 抛掷物理（重力/反弹/落地挤压）
@@ -57,11 +58,12 @@ except ModuleNotFoundError:
     sys.stderr.write(
         "\n[错误] 当前 Python 解释器没有装 PySide6：\n"
         f"    {sys.executable}\n\n"
-        "  依赖装在 .venv 里，用下面任一方式启动：\n"
-        "    run-pet.cmd                                   （双击也行）\n"
+        "  依赖装在项目自己的 .venv 里，用下面任一方式启动：\n"
+        "    run-pet.cmd                                   （双击也行，会先自检环境）\n"
         "    .venv\\Scripts\\python.exe main.py\n\n"
-        "  venv 没建过就先跑 setup-pet.cmd；\n"
-        "  想在自己的 Python 里装：pip install -r requirements.txt\n\n"
+        "  .venv 还没建过的话（在本目录执行）：\n"
+        "    python -m venv .venv\n"
+        "    .venv\\Scripts\\python.exe -m pip install -r requirements.txt\n\n"
     )
     raise SystemExit(1)
 

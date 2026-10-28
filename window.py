@@ -1,13 +1,17 @@
 """透明无边框置顶窗口：动画链状态机 + 拖拽 + 抛掷物理。
 
 状态机（与 Electron 版语义一致）：
-    idle  → 播一段待机，播完掷骰
-    action→ 随机分类小动作，播完掷骰
-    turn  → 转向动画，播完翻转朝向再掷骰
-    move  → 走动动画，按 lead/tail 线性平移窗口，结束掷骰
+    idle  → 播一段待机，播完歇一会儿
+    action→ 随机分类小动作，播完歇一会儿
+    turn  → 转向动画，播完翻转朝向再歇
+    move  → 走动动画，按 lead/tail 线性平移窗口，结束再歇
     drag  → 按住拖动（循环播「被悬空」）
-    throw → 松手后抛掷：重力 + 边缘反弹 + 落地摩擦，静止后回掷骰
-    click → 点击回应，播完掷骰
+    throw → 松手后抛掷：重力 + 边缘反弹 + 落地摩擦，静止后歇一下
+    click → 点击回应，播完歇一会儿
+
+「歇一会儿」= 画面定格在素材末帧（所有动作视频都要求首尾回到标准站姿，所以就是站着不动），
+时长见 config.jsonc 的 animGap：不等长随机 + 动作后加长 + 偶尔发呆，再按当前 CPU 占用拉长
+（机器忙的时候宠物更安静）。原版是播完立刻接下一个，看着像在赶场。
 
 掷骰权重来自 animationWeights（idle/turn/move），余量归随机分类动作。
 右键弹菜单（见 menu.py），菜单里的点播走 play_named()，不受 fixedEnabled 限制。
@@ -15,7 +19,10 @@
 
 from __future__ import annotations
 
+import ctypes
+import os
 import random
+import sys
 import threading
 import time
 from collections import deque
@@ -26,7 +33,7 @@ from PySide6.QtGui import QCursor, QGuiApplication, QImage, QPainter, QPixmap, Q
 from PySide6.QtWidgets import QWidget
 
 import physics
-from config import PetConfig
+from config import AnimGapConfig, PetConfig
 from player import AnimationPlayer, AnimationSet
 
 # 素材几何常量（与 shared/constants.ts 同一套 640×360 画布语义）
@@ -121,6 +128,12 @@ class PetWindow(QWidget):
         self._timer.timeout.connect(self._tick)
         self._timer.start(self.TICK_MS)
 
+        # 动作之间的停顿：播完先安静一段随机时间再掷骰（见 config 的 animGap）
+        self._gap_timer = QTimer(self)
+        self._gap_timer.setSingleShot(True)
+        self._gap_timer.timeout.connect(self._on_gap_elapsed)
+        self._load = _LoadMeter()
+
     def _recalc_geometry(self, width: int, height: int) -> None:
         """尺寸变化后重算「身体贴边」边距、地面高度与抛掷边界。"""
         self._side_allow = width * SIDE_ALLOW_RATIO
@@ -197,6 +210,10 @@ class PetWindow(QWidget):
         if self.external_lock:
             self._stop_move()
             self._throw = None
+            self._gap_timer.stop()
+        elif not self._gap_timer.isActive() and self.state not in ("drag", "throw"):
+            # 占用方把控制权还回来：别干等着，按正常节奏接着自己动
+            self._schedule_next("idle")
 
     def set_sound(self, path: Path | None) -> None:
         self.click_sound = path
@@ -231,6 +248,8 @@ class PetWindow(QWidget):
     def _play(self, name: str, path, *, loop: bool, state: str, on_finish=None) -> bool:
         if not self._player.play(name, path, loop=loop, on_finish=on_finish):
             return False
+        # 有新动画上场，之前排好的「歇一会儿再掷骰」作废（否则会从半路把动作掐掉）
+        self._gap_timer.stop()
         self.state = state
         return True
 
@@ -262,6 +281,8 @@ class PetWindow(QWidget):
 
     def _roll_next(self, force_idle: bool = False) -> None:
         if self.state in ("drag", "throw"):
+            # 正被拖/正飞着：这次先跳过，等落定再排（松手路径也会重排一次）
+            self._schedule_next("idle")
             return
         if self.external_lock:
             # 被第三方占用：只保持当前画面，不自己开新动作（显式点播/点击回应照常走别的入口）
@@ -293,6 +314,40 @@ class PetWindow(QWidget):
             self.facing = "right" if self.facing == "left" else "left"
         # 有「持续状态」就接着播它（工作状态是持续的，不能播一遍就回去发呆）
         if self._status_anim is not None and self._apply_status():
+            return
+        # 否则先歇着，过一会儿再掷骰（kind 决定歇多久）
+        self._schedule_next(self.state)
+
+    # ---------- 动作之间的停顿 ----------
+
+    def _schedule_next(self, kind: str = "idle") -> None:
+        """排下一次掷骰。kind = 刚播完的是什么，用来决定歇多久。"""
+        gap = self._cfg.anim_gap
+        if not gap.enabled:
+            self._roll_next()
+            return
+        self._gap_timer.start(self._gap_ms(kind, gap))
+
+    def _gap_ms(self, kind: str, gap: AnimGapConfig) -> int:
+        """这次要歇多久（毫秒）：固定的随机范围 + 动作惩罚 + 偶尔发呆 + 机器忙加成。"""
+        lo, hi = sorted((gap.min_ms, gap.max_ms))
+        ms = random.uniform(lo, hi)
+        # 干完活 / 走完路 / 被甩出去之后多歇一会儿（越费劲歇越久）
+        if kind in ("action", "turn", "click", "move", "throw") and gap.action_extra_ms:
+            ms += gap.action_extra_ms * random.uniform(0.35, 1.0)
+        # 偶尔发呆：一次停很久，看着像真的在走神
+        if gap.long_pause_ms and random.random() < gap.long_pause_chance:
+            ms += gap.long_pause_ms * random.uniform(0.5, 1.0)
+        # 机器忙（CPU 占用高）时更安静；拿不到占用率就不调
+        load = self._load.sample()
+        if load and gap.load_influence:
+            ms *= 1.0 + gap.load_influence * load
+        return int(max(0.0, ms))
+
+    def _on_gap_elapsed(self) -> None:
+        if self.state in ("drag", "throw"):
+            # 正被拖/正飞着，晚点再说（松手落地的路径也会重排一次）
+            self._schedule_next("idle")
             return
         self._roll_next()
 
@@ -390,7 +445,7 @@ class PetWindow(QWidget):
         if t >= dur:
             self.move(round(self._move_target), self.y())
             self.state = "idle"
-            self._roll_next()
+            self._schedule_next("move")
             return
         travel = max(0.1, dur - lead - tail)
         if t <= lead:
@@ -447,7 +502,7 @@ class PetWindow(QWidget):
         if at_rest:
             self._throw = None
             self.state = "idle"
-            self._roll_next()
+            self._schedule_next("throw")
 
     def _bounce_off_peers(self, state: physics.ThrowState) -> physics.ThrowState:
         """本帧自己被甩出去时撞到别的宠物 → 改写自己的速度 + 通知对方以新初速飞出去。
@@ -566,12 +621,14 @@ class PetWindow(QWidget):
         self._phys = cfg.physics
         self._anims = anims
         self._player.stop()
+        self._gap_timer.stop()
         self._cur = self._prev = self._last_drawn = None
         self.state = "idle"
         self._roll_next(force_idle=True)
 
     def shutdown(self) -> None:
         self._timer.stop()
+        self._gap_timer.stop()
         self._player.stop()
         if self.bubble is not None:
             self.bubble.clear()
@@ -727,9 +784,79 @@ class PetWindow(QWidget):
                 if self._play(name, path, loop=False, state="click", on_finish=self._after_oneshot):
                     print(f"[anim] click → {name}", flush=True)
             else:
-                self._roll_next()
+                self._schedule_next("click")  # 没有「点击回应」素材：点完也照常歇一会儿
         self._trail.clear()
         event.accept()
+
+
+class _FILETIME(ctypes.Structure):
+    _fields_ = [("low", ctypes.c_uint32), ("high", ctypes.c_uint32)]
+
+
+def _ft_value(ft: _FILETIME) -> int:
+    return (ft.high << 32) | ft.low
+
+
+class _LoadMeter:
+    """「除了桌宠自己以外」的 CPU 占用率（0~1），给动作间隔当调味料。
+
+    Windows：`GetSystemTimes` 差两次采样（kernel 时间里已经含 idle，所以
+    busy = (kernel + user) - idle）。两次采样之间正好隔着一个动作，窗口十几秒，够准。
+    其他平台：退回 `os.getloadavg()`（1 分钟平均负载 / 核数）。
+
+    **必须减基线**：桌宠自己解码十几路视频就吃掉一截 CPU，不减的话它永远觉得自己
+    把机器拖满了，间隔只会一路变长（实测能把 2~5s 拉成 29s）。所以第一次采样记作
+    基线，之后只报「比基线多忙了多少」——两者相减之后再算比例。
+    """
+
+    def __init__(self) -> None:
+        self._prev: tuple[int, int, int] | None = None
+        self._ema: float | None = None
+        self._base: float | None = None
+        self._cores = max(1, os.cpu_count() or 1)
+
+    def sample(self) -> float | None:
+        if sys.platform != "win32":
+            return self._sample_posix()
+        idle, kern, user = _FILETIME(), _FILETIME(), _FILETIME()
+        try:
+            ok = ctypes.windll.kernel32.GetSystemTimes(
+                ctypes.byref(idle), ctypes.byref(kern), ctypes.byref(user)
+            )
+        except (AttributeError, OSError):
+            return None
+        if not ok:
+            return None
+
+        cur = (_ft_value(idle), _ft_value(kern), _ft_value(user))
+        prev, self._prev = self._prev, cur
+        if prev is None:
+            return None
+        d_idle = cur[0] - prev[0]
+        d_total = (cur[1] - prev[1]) + (cur[2] - prev[2])
+        if d_total <= 0:
+            return None
+        raw = min(1.0, max(0.0, (d_total - d_idle) / d_total))
+        # 平滑一下：单次抖动别直接反映到间隔上
+        self._ema = raw if self._ema is None else self._ema * 0.55 + raw * 0.45
+        return self._above_baseline(self._ema)
+
+    def _sample_posix(self) -> float | None:
+        try:
+            load = os.getloadavg()[0] / self._cores
+        except (OSError, AttributeError):
+            return None
+        self._ema = min(1.0, max(0.0, load))
+        return self._above_baseline(self._ema)
+
+    def _above_baseline(self, busy: float) -> float:
+        """减去空转基线 → 0 = 跟刚启动时一样闲，1 = 额外吃满了。"""
+        if self._base is None:
+            self._base = busy
+            return 0.0
+        self._base = min(self._base, busy)  # 只有更闲的时候才更新基线
+        spare = max(0.15, 1.0 - self._base)
+        return min(1.0, max(0.0, (busy - self._base) / spare))
 
 
 def _cursor_from(path: Path | None) -> QCursor | None:

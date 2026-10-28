@@ -190,18 +190,19 @@ def icon_state(exe: Path, ico: Path) -> tuple[int, int] | None:
 
 
 def ensure_pyinstaller() -> None:
+    """只检查，**不替用户装**：环境归用户自己管。
+
+    以前这里是「没有就静默 pip install」，等于把装包副作用藏进打包流程；
+    现在缺了就直接说清楚哪条命令要跑 —— 编译只做编译。
+    """
     try:
         import PyInstaller  # noqa: F401
     except ModuleNotFoundError:
-        print("      没装 PyInstaller，先装一个 ...")
-        subprocess.run(
-            [
-                sys.executable, "-m", "pip", "install", "-q",
-                "--disable-pip-version-check", "-i", MIRROR, "pyinstaller",
-            ],
-            check=True,
-        )
-        print("      ok")
+        print("\n[失败] 当前解释器里没有 PyInstaller：")
+        print(f"       {sys.executable}")
+        print("\n  装上再重跑本命令（只需一次）：")
+        print(f'       "{sys.executable}" -m pip install -i {MIRROR} pyinstaller')
+        raise SystemExit(1)
 
 
 def _mirror(src: Path, dst: Path) -> tuple[int, int]:
@@ -264,10 +265,10 @@ def sync_assets() -> Path:
     """
     if not SRC_ASSETS.is_dir():
         ASSETS_DIR.mkdir(parents=True, exist_ok=True)
-        print(f"      [提示] 没有 {SRC_ASSETS.name}\\ 素材目录 —— 先跑 make-webm.cmd 生成")
+        print(f"      [提示] 没有 {SRC_ASSETS.name}\\ 素材目录 —— 先跑 python make_pet_webm.py 生成")
         return ASSETS_DIR
     if not _has_webm(SRC_ASSETS):
-        print(f"      [提示] {SRC_ASSETS.name}\\ 里还没有 webm 素材 —— 先跑 make-webm.cmd 生成")
+        print(f"      [提示] {SRC_ASSETS.name}\\ 里还没有 webm 素材 —— 先跑 python make_pet_webm.py 生成")
 
     print("      镜像素材：assets/ → dist/assets/ ...")
     written, deleted = _mirror(SRC_ASSETS, ASSETS_DIR)

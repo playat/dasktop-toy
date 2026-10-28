@@ -26,12 +26,12 @@
 依赖：av（PyAV）、numpy、Pillow —— 都用工作区的 .venv，**不需要装 ffmpeg**。
 
 用法（在工作区根目录跑，**不带参数就行**）：
-    make-webm.cmd                          双击：处理 video\\src 下所有新视频
+    python make_pet_webm.py                处理 video\\src 下所有新视频（已存在的跳过）
     .venv\\Scripts\\python.exe make_pet_webm.py
 
     # 源目录默认 video/src（原始 mp4 就放这里）
     # 输出写工程根的 assets/webm —— 那是项目文件（进 git），源码模式运行时直接读它
-    # 打完包再跑一次 build.cmd，assets/ 会被整个镜像进 dist/assets/，那一份才是分发用的产物
+    # 打包时 assets/ 会被整个镜像进 dist/assets/（build.py 负责），那一份才是分发用的产物
     # 文件名 = 源文件名（= 动画名）
     # --force   已有成品也全部重做
     # --only 关键字 / --jobs 4 / --out / --mask / --no-watermark / --no-sync
@@ -631,7 +631,7 @@ class Spinner:
 def sync_to_dist(out: Path, targets: list[Path]) -> int:
     """把刚生成的成品顺带复制到 dist/assets/webm，返回复制个数。
 
-    为什么要有这一步：dist/ 是构建产物，正常靠 `build.cmd` 从 assets/ 整个镜像出来。
+    为什么要有这一步：dist/ 是构建产物，正常靠 `build.py` 从 assets/ 整个镜像出来。
     但「宠物开着（跑的是 dist 里那份 exe）+ 又往素材里加了动作」这种情况如果不同步，
     就得为了一个动作重跑一遍打包。所以默认顺手同步一次；它只是让产物跟上源，
     并不是第二份源——下次 build 照样按 assets/ 重建 dist/assets。
@@ -704,7 +704,7 @@ def main() -> int:
         print("    1. 路径拼错，或带了多余的引号 / 末尾反斜杠（已自动清理过一次）")
         print('    2. 路径含中文或空格时要用引号包住：--src "C:\\我的 视频"')
         print("    3. 目录在受保护位置（如 C:\\Program Files、别的用户目录）→ 需要管理员权限")
-        print(f"  最省事的做法：把视频复制到 {DEFAULT_SRC}，然后直接跑 make-webm.cmd（不带参数）")
+        print(f"  最省事的做法：把视频复制到 {DEFAULT_SRC}，然后跑 python make_pet_webm.py（不带参数）")
         return 2
     if not src.is_dir():
         print(f"[错误] {src} 是个文件，--src 要给目录。它所在目录是：{src.parent}")
@@ -855,12 +855,12 @@ def main() -> int:
 
     if ok:
         print("已写入工程素材目录 assets/webm（项目文件）。")
-        print("  跑源码（run-pet.cmd）：右键菜单会自动重扫，不用重启就能看到新动作。")
+        print("  跑源码（run-pet.cmd 或 python main.py）：右键菜单会自动重扫，不用重启就能看到新动作。")
         synced = 0 if args.no_sync else sync_to_dist(out, [d for _, d in plan])
         if synced:
             print(f"  顺带同步了 {synced} 个到 dist/assets/webm（打包产物那侧也能直接用）。")
         elif not args.no_sync and out.resolve() == ASSET_WEBM.resolve():
-            print("  想更新可分发版本：跑一次 build.cmd 把 assets/ 整个镜像进 dist/。")
+            print("  想更新可分发版本：跑一次 python build.py 把 assets/ 整个镜像进 dist/。")
     return 0 if ok == total else 1
 
 

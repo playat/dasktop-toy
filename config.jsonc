@@ -16,7 +16,7 @@
 //   收进分类目录里不影响归类。右键「动作」菜单照搬目录树（最前面另加一块表情包），两者互不干扰。
 //
 // 本文件的顶层键：
-//   pets / physics / moves / noMirror / animationWeights / confineToScreen  窗口与手感
+//   pets / physics / moves / noMirror / animationWeights / animGap / confineToScreen  窗口与手感
 //   font / events / eventsRefreshSec / workStatusTexts / memes              说话与联动
 //   dsh（含余额直连参数）/ session（会话日志观察）/ ai（本机模型）            数据源
 // 仍然没有实现的字段在文件末尾的块注释里备查（代码不读）。
@@ -229,6 +229,29 @@
     "idle": 10,
     "turn": 5,
     "move": 5
+  },
+
+  // ===================== 动作之间的停顿 =====================
+  // 原版是「一个动作播完立刻接下一个」，节奏像赶场。这里在两次动作之间插一段
+  // **不等长**的静止：画面定格在素材末帧 —— 所有动作视频都要求「首尾回到标准站姿」，
+  // 所以定格看着就是站着不动，不会停在半空之类的怪姿势。
+  //
+  //   实际间隔 = random(minMs, maxMs)
+  //            + 动作之后再加 actionExtraMs × random(0.35, 1)  ← 干完活/走完路多喘口气
+  //            + 偶尔发呆：以 longPauseChance 的概率再加 longPauseMs × random(0.5, 1)
+  //            × (1 + loadInfluence × 当前 CPU 占用率)         ← 机器忙的时候宠物更安静
+  //
+  // 按下面这组默认值：平时歇 2~5.5s，动作后 2.7~7.5s，约 12% 的概率再拖 6~12s，
+  // CPU 吃满时整体 ×1.6。嫌太快就把 minMs/maxMs 往上调；
+  // 想恢复原版的「无缝连播」写 "enabled": false。
+  "animGap": {
+    "enabled": true,
+    "minMs": 2000,
+    "maxMs": 5500,
+    "actionExtraMs": 2000,
+    "longPauseChance": 0.12,
+    "longPauseMs": 12000,
+    "loadInfluence": 0.6
   }
 }
 

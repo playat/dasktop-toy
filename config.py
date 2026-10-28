@@ -182,6 +182,28 @@ class SessionConfig:
 
 
 @dataclass
+class AnimGapConfig:
+    """两个动作之间的停顿（`animGap`）。
+
+    原版是「播完立刻接下一个」，看着像在赶场。这里在两次动作之间插一段**不等长**的
+    静止：画面停在素材末帧（动作视频都要求首尾回到标准站姿，所以就是站着不动）。
+
+    最终间隔 = 随机(min_ms, max_ms)
+             + 动作之后额外加（action_extra_ms × 0.35~1，越费劲歇越久）
+             + 偶尔发呆（long_pause_chance 概率，加 long_pause_ms × 0.5~1）
+             × (1 + load_influence × 当前 CPU 占用)   ← 机器越忙，宠物越安静
+    """
+
+    enabled: bool = True
+    min_ms: int = 2000
+    max_ms: int = 5500
+    action_extra_ms: int = 2000
+    long_pause_chance: float = 0.12
+    long_pause_ms: int = 12000
+    load_influence: float = 0.6
+
+
+@dataclass
 class PetSpec:
     """pets[] 里的一只宠物（多开 = 数组里多条）。"""
 
@@ -198,6 +220,7 @@ class PetConfig:
     pools: AnimationPools = field(default_factory=AnimationPools)
     weights: dict[str, float] = field(default_factory=lambda: {"idle": 10, "turn": 5, "move": 5})
     physics: PhysicsParams = field(default_factory=PhysicsParams)
+    anim_gap: AnimGapConfig = field(default_factory=AnimGapConfig)
     fixed: bool = False
     # 根字段（不属于 physics）：抛掷时是否把宠物锁在松手所在那块屏内。
     # True = 屏缝当墙（不会飞到隔壁屏）；False = 允许跨屏飞行，落到隔壁屏。
@@ -268,6 +291,7 @@ class PetConfig:
             pools=pools,
             weights=weights,
             physics=PhysicsParams.from_dict(raw.get("physics") or {}),
+            anim_gap=_anim_gap(raw.get("animGap") or {}),
             fixed=specs[0].fixed,
             confine_to_screen=bool(raw.get("confineToScreen", False)),
             pets=specs,
@@ -290,6 +314,28 @@ def _num(value: Any, fallback: float) -> float:
     except (TypeError, ValueError):
         return fallback
     return got if got > 0 else fallback
+
+
+def _anim_gap(raw: dict[str, Any]) -> AnimGapConfig:
+    """`animGap`：动作之间的停顿。这里的 0 是有意义的（0 停顿 / 0 负载加成），
+    所以不能用 _num（它把 0 当没写）。"""
+
+    def g(key: str, fallback: float, low: float = 0.0, high: float = 1e9) -> float:
+        try:
+            got = float(raw.get(key, fallback))
+        except (TypeError, ValueError):
+            return fallback
+        return min(high, max(low, got))
+
+    cfg = AnimGapConfig()
+    cfg.enabled = bool(raw.get("enabled", True))
+    cfg.min_ms = int(g("minMs", cfg.min_ms, 0, 600_000))
+    cfg.max_ms = int(g("maxMs", cfg.max_ms, 0, 600_000))
+    cfg.action_extra_ms = int(g("actionExtraMs", cfg.action_extra_ms, 0, 600_000))
+    cfg.long_pause_chance = g("longPauseChance", cfg.long_pause_chance, 0.0, 1.0)
+    cfg.long_pause_ms = int(g("longPauseMs", cfg.long_pause_ms, 0, 600_000))
+    cfg.load_influence = g("loadInfluence", cfg.load_influence, 0.0, 5.0)
+    return cfg
 
 
 def _font(raw: dict[str, Any]) -> FontConfig:

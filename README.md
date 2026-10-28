@@ -10,8 +10,7 @@
 dsh-pet/
 ├── .venv/                      工作区统一虚拟环境（运行 + 素材工具共用）
 ├── requirements.txt
-├── setup-pet.cmd               建 venv + 装依赖
-├── run-pet.cmd                 启动桌宠（源码模式）
+├── run-pet.cmd                 启动桌宠（源码模式；启动前先自检 .venv 与依赖）
 │
 ├── main.py                     运行时入口
 ├── window.py player.py video.py config.py physics.py menu.py tray.py
@@ -25,8 +24,7 @@ dsh-pet/
 ├── config.jsonc                配置（JSONC，带注释）
 │
 ├── make_pet_webm.py            素材生成工具（一条命令，单遍管线，默认增量）
-├── make-webm.cmd               双击就跑（不带参数 = 处理 video/src）
-├── build.py / build.cmd        打包成 exe
+├── build.py                    打包成 exe（python build.py）
 ├── prompts/                    AI 生成提示词配方（106 个动作 + 通知图标两套）
 ├── video/
 │   ├── watermark_mask_v5.mkv   水印遮罩（1280×720）
@@ -40,7 +38,7 @@ dsh-pet/
 │   └── fonts/上首软糖体.ttf    气泡字体
 │
 └── dist/                       构建产物：一条 build 就能整个重建，可整包搬走
-    ├── DshPet.exe              跑一次 build.cmd 就有
+    ├── DshPet.exe              跑一次 python build.py 就有
     ├── _internal/              Qt / PyAV / numpy 等运行时
     ├── config.jsonc            打包时从根目录复制一份
     └── assets/                按 assets/ 镜像出来的一份（多出来的会删掉）
@@ -53,7 +51,7 @@ prompts/  →  AI 生成  →  video/src/*.mp4  →  make_pet_webm.py  →  asse
                                                                          │
                                           ┌──────────────────────────────┴────────────┐
                                           ▼                                           ▼
-                              run-pet.cmd（读工程 assets/）          build.cmd ──► dist/（整包可搬）
+                              run-pet.cmd（读工程 assets/）      python build.py ──► dist/（整包可搬）
 ```
 
 两个目录分工明确：
@@ -62,7 +60,7 @@ prompts/  →  AI 生成  →  video/src/*.mp4  →  make_pet_webm.py  →  asse
 - **`dist/` 是构建产物**（不进 git）—— `build.py` 打包前把 `assets/` 整个镜像一遍，
   里面每一样东西都能从工程文件重建出来。拷给别人就能跑，自己删了也不心疼。
 
-改了代码或换了素材，跑一次 `build.cmd`，`dist/` 就变成与工程内容一致的、可直接分发的一版。
+改了代码或换了素材，跑一次 `python build.py`，`dist/` 就变成与工程内容一致的、可直接分发的一版。
 
 数据来源只在运行时决定：**能读会话日志就用它（工作状态），有 DSH 再接 DSH，没有就用本机模型，
 都没有就纯本地**（第 2 节）。
@@ -71,9 +69,24 @@ prompts/  →  AI 生成  →  video/src/*.mp4  →  make_pet_webm.py  →  asse
 
 ## 1. 跑起来
 
+首次准备环境（只做一次，在本目录执行）：
+
 ```bat
-setup-pet.cmd     :: 首次：建 .venv + 装依赖（PySide6 / av / numpy / pillow / zstandard）
-run-pet.cmd       :: 启动桌宠
+python -m venv .venv
+.venv\Scripts\python.exe -m pip install -r requirements.txt
+```
+
+之后启动。`run-pet.cmd` 会先自检 —— 没有 `.venv`、venv 里的 python 起不来、
+依赖缺了哪个，都直接说清楚该怎么办，不会甩一堆 traceback：
+
+```bat
+run-pet.cmd
+```
+
+也可以不经过 .cmd，直接用自己的解释器跑：
+
+```bat
+.venv\Scripts\python.exe main.py
 ```
 
 手动激活环境（想跑别的脚本时）：
@@ -86,12 +99,14 @@ source .venv/Scripts/activate      # Git Bash
 
 - 右键宠物：顶部「动作」点播（第一项是表情包子菜单）、大小、固定原地、回到初始位置、重载配置，
   然后平铺的 **碎碎念 / 说句话… / 刷新余额 / 再来一只**，最后退出
+- 自己动的时候，两次动作之间会歇一段随机时间（平时 2~5.5s，动作后更久，偶尔发呆；
+  机器忙时更安静），歇着就定格在站姿，不会一个接一个赶场 —— 参数见 `animGap`
 - 拖拽：松手站住；**甩出去**才会飞、撞墙反弹、落地压一下
 - 托盘图标：显示/隐藏、再来一只、全部回到初始位置、重载配置、退出
 - 终端里 `Ctrl+C` 退出
 
 配置在 `config.jsonc`（JSONC，带注释），改完右键「重载配置」即可，不用重启。
-顶层就这些键：`pets` `physics` `moves` `noMirror` `animationWeights` `confineToScreen`（窗口与手感）、
+顶层就这些键：`pets` `physics` `moves` `noMirror` `animationWeights` `animGap` `confineToScreen`（窗口与手感）、
 `font` `events` `eventsRefreshSec` `workStatusTexts` `memes`（说话与联动）、
 `dsh`（含余额直连参数）、`session`（会话日志观察）、`ai`（本机模型）。
 **动画素材清单仍然不在配置里**，播什么由 `assets/webm` 的目录名决定（见下）。
@@ -416,7 +431,7 @@ DSH 的 `workStatus` 只在插件推的时候才有，粒度也粗。这条路�
 
 ## 3. 生成素材
 
-最省事的用法：**把 AI 生成的绿幕视频丢进 `video/src/`，双击 `make-webm.cmd`。**
+最省事的用法：**把 AI 生成的绿幕视频丢进 `video/src/`，跑 `python make_pet_webm.py`。**
 
 脚本会先报清单，再只做没做过的：
 
@@ -517,7 +532,7 @@ video/src/                          assets/webm/
 
 1. 用 `prompts/桌面宠物 10 秒动作提示词.md` 里的配方生成绿幕视频 —— **「通用前缀」那一段不能改**，绿幕纯色、角色居中、双脚锚定、首尾是标准站立，全靠它保证下游能对齐
 2. 全部丢进 `video/src/`（顺手建好分类子目录，比如 `video/src/吃吃喝喝/吃饺子.mp4`），
-   双击 `make-webm.cmd` —— 成品直接镜像到 `assets/webm/吃吃喝喝/吃饺子.webm`，不用再复制
+   跑 `python make_pet_webm.py` —— 成品直接写到 `assets/webm/吃吃喝喝/吃饺子.webm`，不用再复制
 3. **右键菜单立刻就有**：素材进了 `assets/webm` 就算完事；分类完全靠目录，自己建子目录即可
    （`assets/webm/小动作/悠闲哼歌.webm` → 菜单里就是「小动作 → 悠闲哼歌」）；
    想在某个分类上写点备注，就在那个目录里放一个 `说明.md`
@@ -533,14 +548,22 @@ video/src/                          assets/webm/
 配比看 `animationWeights`（待机/转向/走位三档的掷骰权重，余下的概率给随机小动作）；
 `fixedEnabled: true` 的宠物不会自己翻朝向、不会自己走动。
 
+两次动作之间会歇一段随机时间（`animGap`），不再一个接一个赶场。间隔 = 随机区间 + 动作后加长
++ 偶尔发呆，**再乘上当前 CPU 占用**（机器忙的时候宠物更安静）。歇着的时候画面定格在素材末帧——
+动作视频都要求首尾回到标准站姿，所以看着就是站着不动。想更快/更慢改 `minMs`/`maxMs`，
+想恢复原来的无缝连播写 `"enabled": false`。
+
 ## 5. 打包成可执行文件
 
 ```bat
-build.cmd                :: 目录版 dist\DshPet.exe（推荐）
-build.cmd --onefile      :: 单文件 dist\DshPet.exe（启动慢，体积集中）
-build.cmd --console      :: 带黑窗口，能看实时日志
-build.cmd --clean        :: 先清 build/ 和 dist/ 里的旧构建件（素材会重新镜像）
+.venv\Scripts\python.exe build.py            :: 目录版 dist\DshPet.exe（推荐）
+.venv\Scripts\python.exe build.py --onefile  :: 单文件 dist\DshPet.exe（启动慢，体积集中）
+.venv\Scripts\python.exe build.py --console  :: 带黑窗口，能看实时日志
+.venv\Scripts\python.exe build.py --clean    :: 先清 build/ 和 dist/ 里的旧构建件（素材会重新镜像）
 ```
+
+`build.py` 只做编译：镜像素材 → 抠图标 → PyInstaller → 搬到 `dist/` 根。
+它**不会替你装 PyInstaller**（缺了会直接告诉你那条 pip 命令）。
 
 产物**直接平铺在 `dist\` 里，没有 DshPet 那一层**，配置和素材都摆在 exe 旁边，不塞进包里：
 
@@ -597,7 +620,7 @@ exe 图标取 `assets/webm/待机/` 里第一个素材的首帧（没有待机�
 
 ## 依赖
 
-- Python 3.10~3.13（3.14 上 PySide6 轮子不一定齐，`setup-pet.cmd` 会优先用 PATH 里的 `python`）
+- Python 3.10~3.13（3.14 上 PySide6 轮子不一定齐）。建 venv 用 PATH 里的 `python`，版本不对就先换一个再建
 - `requirements.txt`：PySide6-Essentials / av / numpy / pillow / zstandard（读会话日志用）
 - 素材编码：PyAV 自带的 libvpx-vp9，**不需要外部 ffmpeg**
 
