@@ -26,7 +26,7 @@
     回到初始位置
     重载配置
     碎碎念 / 说句话… / 刷新余额          ← events.EventDirector 注入（`extra`）
-    退出
+    退出                                 ← 开了多只时改叫「关掉这只」（`quit_text`）
 
 「动作」里的注入项走 `action_extra`（可以是 QAction，也可以是整块 QMenu）。
 
@@ -154,6 +154,7 @@ def build_menu(
     on_home: Callable[[], None],
     on_reload: Callable[[], None],
     on_quit: Callable[[], None],
+    quit_text: str = "退出",
     extra: list[QAction] | None = None,
     action_extra: list[QAction | QMenu] | None = None,
 ) -> QMenu:
@@ -209,7 +210,7 @@ def build_menu(
         menu.addAction(act)
 
     menu.addSeparator()
-    quit_act = QAction("退出", menu)
+    quit_act = QAction(quit_text, menu)
     quit_act.triggered.connect(lambda _checked=False: on_quit())
     menu.addAction(quit_act)
 

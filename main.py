@@ -230,7 +230,7 @@ class PetApp:
         win.show()
         win.start()
         win.pet_id = spec.id
-        self.events.attach(spec.id, win)
+        win.pet_key = self.events.attach(spec.id, win)
         self._decorate(win)
         self.windows.append(win)
         self._refresh_tray_tip()
@@ -248,7 +248,8 @@ class PetApp:
         """托盘悬停提示：显示开了几只、都叫什么（pets[].name 的唯一用处）。"""
         if self.tray is None:
             return
-        names = [spec.name or spec.id for spec in self.cfg.pets]
+        # 按窗户当前真实存活的只数列，多开之后不能再拿 cfg.pets 的长度充数
+        names = [self.events.pet_name(getattr(w, "pet_id", "")) for w in self.windows]
         tip = f"dsh-pet 桌宠 · {len(self.windows)} 只"
         if names:
             tip += "\n" + "、".join(names)
@@ -288,14 +289,16 @@ class PetApp:
         spawn_act = QAction("再来一只", win)
         spawn_act.triggered.connect(lambda _checked=False: self.spawn())
 
-        pet_id = getattr(win, "pet_id", None)
-        # 根菜单上的直接入口：碎碎念 / 说句话… / 刷新余额
-        extra = [*self.events.menu_actions(pet_id), spawn_act]
+        # 菜单注入的条目要落到「右键的这只」身上，而不是永远第一只
+        pet_key = getattr(win, "pet_key", None) or getattr(win, "pet_id", None)
+        extra = [*self.events.menu_actions(pet_key), spawn_act]
 
         # 「动作」子菜单里多一块表情包（一张图都没有时返回 None，不占位置）
-        meme_menu = self.events.meme_menu(pet_id)
+        meme_menu = self.events.meme_menu(pet_key)
         action_extra = [meme_menu] if meme_menu is not None else []
 
+        # 只剩一只时「退出」= 结束程序；还有别的宠物时它只关掉右键的这一只
+        solo = len(self.windows) <= 1
         menu = build_menu(
             None,
             self.anims,
@@ -306,13 +309,29 @@ class PetApp:
             on_fixed=win.set_fixed,
             on_home=win.reset_home,
             on_reload=self.reload,
-            on_quit=self.quit,
+            on_quit=self.quit if solo else (lambda: self.close_pet(win)),
+            quit_text="退出" if solo else "关掉这只",
             extra=extra,
             action_extra=action_extra,
         )
         menu.exec(global_pos)
 
     # ---------- 全局操作 ----------
+
+    def close_pet(self, win: PetWindow) -> None:
+        """右键「关掉这只」：只收掉这一只，收掉最后一只才真的退出程序。"""
+        if win not in self.windows:
+            return
+        self.windows.remove(win)
+        self.events.detach(win)   # 先摘引用，否则事件还会往已关闭的窗口上打
+        win.shutdown()
+        win.close()
+        win.deleteLater()
+        if not self.windows:
+            self.quit()
+            return
+        self._refresh_tray_tip()
+        print(f"[pet] 关掉一只 · 还剩 {len(self.windows)} 只", flush=True)
 
     def set_hidden(self, hidden: bool) -> None:
         self._hidden = hidden

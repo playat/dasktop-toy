@@ -230,8 +230,17 @@ class EventDirector(QObject):
 
     # ---------------- 装配 ----------------
 
-    def attach(self, pet_id: str, win) -> None:
-        """给一只宠物配气泡，并挂上位置跟随。"""
+    def attach(self, pet_id: str, win) -> str:
+        """给一只宠物配气泡，并挂上位置跟随。返回它在 events 里的唯一 key。
+
+        「再来一只」开出来的几只是同一个 pet_id，直接拿 pet_id 当键会让后一只把前一只的
+        气泡和窗口引用顶掉（于是只有最后一只收得到事件）。这里按需加 `#2`/`#3` 后缀，
+        单只时 key 就等于 pet_id，行为不变。
+        """
+        key, n = pet_id, 2
+        while key in self._windows:
+            key = f"{pet_id}#{n}"
+            n += 1
         bubble = SpeechBubble()
         bubble.configure(
             pet_size=win.width(),
@@ -239,9 +248,21 @@ class EventDirector(QObject):
             size=self.cfg.font.size,
             follow=self.cfg.font.follow_pet,
         )
-        self._bubbles[pet_id] = bubble
-        self._windows[pet_id] = win
+        self._bubbles[key] = bubble
+        self._windows[key] = win
         win.attach_bubble(bubble)
+        return key
+
+    def detach(self, win) -> None:
+        """关掉一只宠物时调用：摘掉它的气泡和引用，别让事件再打到已关闭的窗口上。"""
+        for key in [k for k, w in self._windows.items() if w is win]:
+            bubble = self._bubbles.pop(key, None)
+            if bubble is not None:
+                bubble.close()
+            self._windows.pop(key, None)
+            self._locked.discard(key)
+            self._history.pop(key, None)
+            self._ai_busy.discard(key)
 
     def detach_all(self) -> None:
         for bubble in self._bubbles.values():
@@ -438,7 +459,10 @@ class EventDirector(QObject):
         self.say(pet_id, "（我还没接上模型，先去配 ai.baseUrl）", duration_ms=4000)
 
     def _pet_arg(self, pet_id: str | None) -> str:
-        return pet_id or self.cfg.dsh.pet_id or self.cfg.pets[0].id
+        # events 内部 key 可能带 `#2` 后缀（多开），对外只认原始 id
+        if pet_id:
+            return pet_id.split("#", 1)[0]
+        return self.cfg.dsh.pet_id or self.cfg.pets[0].id
 
     def _play_whisper_anim(self, pet_id: str | None) -> str | None:
         """随机抽一段 碎碎念-* 播一遍（没有素材就返回 None）。"""
