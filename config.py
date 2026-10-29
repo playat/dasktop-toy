@@ -204,6 +204,36 @@ class AnimGapConfig:
 
 
 @dataclass
+class BasketballConfig:
+    """投篮小游戏（`basketball`）。
+
+    玩法：右键菜单开局 → 蓝框篮筐出现（`assets/pic/basket.png` 存在就画图）→ 拖动宠物甩向
+    筐口 → 飞行中身体中心穿过判定圆就计分（1~10）→ 头顶飘 +N。
+
+    判定几何（全部相对篮筐窗口，写比例所以换图/换尺寸都不用改代码）：
+        mouth_x / mouth_y   筐口中心在窗口里的位置（0~1）
+        mouth_ratio         筐口内径 / 窗口宽度
+        hit_ratio           判定半径 / 筐口半径（0.55 ≈ 比筐口小一圈，边缘还能擦进）
+        perfect_ratio       满分圈 / 判定半径（0.2 = 中心 20% 区给 10 分）
+    """
+
+    enabled: bool = True
+    image: str = "assets/pic/basket.png"
+    width: int = 260
+    height: int = 260
+    mouth_ratio: float = 0.72
+    mouth_x: float = 0.5
+    mouth_y: float = 0.42
+    hit_ratio: float = 0.55
+    perfect_ratio: float = 0.20
+    badge_offset: int = 8
+    celebrate_anim: str = "点击回应/点击回应-开心跃动"
+    show_rings: bool = False      # 有图之后还想看判定圈就打开（占位蓝框永远画圈）
+    return_home: bool = True      # 命中后把宠物送回这一投的起点
+    return_delay_ms: int = 220    # 落地多久之后回去（留一点「落地」的观感）
+
+
+@dataclass
 class PetSpec:
     """pets[] 里的一只宠物（多开 = 数组里多条）。"""
 
@@ -221,6 +251,7 @@ class PetConfig:
     weights: dict[str, float] = field(default_factory=lambda: {"idle": 10, "turn": 5, "move": 5})
     physics: PhysicsParams = field(default_factory=PhysicsParams)
     anim_gap: AnimGapConfig = field(default_factory=AnimGapConfig)
+    basketball: BasketballConfig = field(default_factory=BasketballConfig)
     fixed: bool = False
     # 根字段（不属于 physics）：抛掷时是否把宠物锁在松手所在那块屏内。
     # True = 屏缝当墙（不会飞到隔壁屏）；False = 允许跨屏飞行，落到隔壁屏。
@@ -292,6 +323,7 @@ class PetConfig:
             weights=weights,
             physics=PhysicsParams.from_dict(raw.get("physics") or {}),
             anim_gap=_anim_gap(raw.get("animGap") or {}),
+            basketball=_basketball(raw.get("basketball") or {}),
             fixed=specs[0].fixed,
             confine_to_screen=bool(raw.get("confineToScreen", False)),
             pets=specs,
@@ -335,6 +367,36 @@ def _anim_gap(raw: dict[str, Any]) -> AnimGapConfig:
     cfg.long_pause_chance = g("longPauseChance", cfg.long_pause_chance, 0.0, 1.0)
     cfg.long_pause_ms = int(g("longPauseMs", cfg.long_pause_ms, 0, 600_000))
     cfg.load_influence = g("loadInfluence", cfg.load_influence, 0.0, 5.0)
+    return cfg
+
+
+def _basketball(raw: dict[str, Any]) -> BasketballConfig:
+    """`basketball`：投篮游戏。比例类字段夹到 (0,1]，写大了不至于把判定圈撑成整屏。"""
+
+    def g(key: str, fallback: float, low: float, high: float) -> float:
+        try:
+            got = float(raw.get(key, fallback))
+        except (TypeError, ValueError):
+            return fallback
+        return min(high, max(low, got))
+
+    cfg = BasketballConfig()
+    cfg.enabled = bool(raw.get("enabled", True))
+    if isinstance(raw.get("image"), str):
+        cfg.image = raw["image"].strip()
+    cfg.width = int(g("width", cfg.width, 80, 1200))
+    cfg.height = int(g("height", cfg.height, 80, 1200))
+    cfg.mouth_ratio = g("mouthRatio", cfg.mouth_ratio, 0.10, 1.0)
+    cfg.mouth_x = g("mouthX", cfg.mouth_x, 0.0, 1.0)
+    cfg.mouth_y = g("mouthY", cfg.mouth_y, 0.0, 1.0)
+    cfg.hit_ratio = g("hitRatio", cfg.hit_ratio, 0.05, 1.0)
+    cfg.perfect_ratio = g("perfectRatio", cfg.perfect_ratio, 0.0, 0.90)
+    cfg.badge_offset = int(g("badgeOffset", cfg.badge_offset, 0, 200))
+    if isinstance(raw.get("celebrateAnim"), str):
+        cfg.celebrate_anim = raw["celebrateAnim"].strip()
+    cfg.show_rings = bool(raw.get("showRings", False))
+    cfg.return_home = bool(raw.get("returnHome", True))
+    cfg.return_delay_ms = int(g("returnDelayMs", cfg.return_delay_ms, 0, 3000))
     return cfg
 
 

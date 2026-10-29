@@ -23,6 +23,7 @@
          └ 动画目录…
     大小 ┬ 大 / 中 / 小 / 迷你
     固定原地（勾选）
+    投篮游戏                              ← main 注入（`game_action`），开局后变「结束投篮游戏（N 分）」
     回到初始位置
     重载配置
     碎碎念 / 说句话… / 刷新余额          ← events.EventDirector 注入（`extra`）
@@ -157,6 +158,7 @@ def build_menu(
     quit_text: str = "退出",
     extra: list[QAction] | None = None,
     action_extra: list[QAction | QMenu] | None = None,
+    game_action: QAction | None = None,
 ) -> QMenu:
     menu = QMenu(parent)
     menu.setStyleSheet(MENU_QSS)
@@ -194,6 +196,11 @@ def build_menu(
     fixed_act.setChecked(fixed)
     fixed_act.triggered.connect(lambda checked: on_fixed(checked))
     menu.addAction(fixed_act)
+
+    # ---- 投篮游戏（开局 / 结束同一项，文案由调用方决定，带当前分数）----
+    if game_action is not None:
+        game_action.setParent(menu)
+        menu.addAction(game_action)
 
     menu.addSeparator()
 

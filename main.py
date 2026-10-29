@@ -7,7 +7,7 @@
 
 能力：透明窗口 + VP9-alpha 播放 + 动画链状态机（待机/随机动作/转向/走位）
       + 点击回应 + 拖拽 + 抛掷物理（重力/反弹/落地挤压）
-      + 右键菜单（动作点播 / 大小 / 固定原地 / 回到初始位置 / 重载配置）
+      + 右键菜单（动作点播 / 大小 / 固定原地 / 投篮游戏 / 回到初始位置 / 重载配置）
       + 系统托盘 + 多开（配置 pets[] 写几只就是几只，托盘也能「再来一只」）。
 退出：Ctrl+C、托盘退出、右键菜单退出。
 
@@ -67,6 +67,7 @@ except ModuleNotFoundError:
     )
     raise SystemExit(1)
 
+from basket import BasketGame, load_basket_image  # noqa: E402
 from config import PetConfig, PetSpec  # noqa: E402
 from events import EventDirector  # noqa: E402
 from menu import build_menu  # noqa: E402
@@ -100,6 +101,8 @@ def _assets_dir() -> Path:
 
 ASSETS = _assets_dir()
 CONFIG_FILE = HERE / "config.jsonc"
+# 投篮最高分（跟 exe 放一起：打包后是 dist/basket-score.json，源码模式是工程根目录）
+SCORE_FILE = HERE / "basket-score.json"
 
 
 def load_font_family(assets: Path, cfg: PetConfig) -> str:
@@ -192,6 +195,7 @@ class PetApp:
         self.events.status.connect(lambda line: print(line, flush=True))
         self.windows: list[PetWindow] = []
         self.tray: PetTray | None = None
+        self.game: BasketGame | None = None   # 投篮游戏（同一时刻只开一局）
         self._hidden = False
 
         # 位置上报（只有连上 DSH 才有意义，events 内部自己判）
@@ -297,6 +301,13 @@ class PetApp:
         meme_menu = self.events.meme_menu(pet_key)
         action_extra = [meme_menu] if meme_menu is not None else []
 
+        # 投篮游戏开/关是同一个菜单项：正在玩就显示「结束投篮游戏（N 分）」
+        playing = self.game is not None and self.game.win is win
+        game_act = QAction(
+            f"结束投篮游戏（{self.game.score} 分）" if playing else "投篮游戏", win
+        )
+        game_act.triggered.connect(lambda _checked=False, w=win: self.toggle_game(w))
+
         # 只剩一只时「退出」= 结束程序；还有别的宠物时它只关掉右键的这一只
         solo = len(self.windows) <= 1
         menu = build_menu(
@@ -313,8 +324,43 @@ class PetApp:
             quit_text="退出" if solo else "关掉这只",
             extra=extra,
             action_extra=action_extra,
+            game_action=game_act,
         )
         menu.exec(global_pos)
+
+    # ---------- 投篮游戏 ----------
+
+    def toggle_game(self, win: PetWindow) -> None:
+        """右键「投篮游戏」：这一只正在玩就收掉，否则（先收掉别的局）给这一只开一局。"""
+        if self.game is not None and self.game.win is win:
+            self.stop_game()
+            return
+        self.stop_game()
+
+        if not self.cfg.basketball.enabled:
+            print("[game] 配置里 basketball.enabled = false，不开局", flush=True)
+            return
+
+        image = load_basket_image(self.cfg.basketball.image, HERE, ASSETS)
+        if image is None:
+            print(
+                f"[game] 没找到篮筐图 {self.cfg.basketball.image}，先用蓝框占位", flush=True
+            )
+        game = BasketGame(
+            win, self.cfg.basketball, image, SCORE_FILE, self.cfg.font.family
+        )
+        game.on_quit = self.stop_game
+        if not game.start():
+            game.stop()
+            return
+        self.game = game
+
+    def stop_game(self) -> None:
+        """收掉当前这一局（关掉这只宠物 / 重载配置 / 托盘隐藏 / 退出 都要走这里）。"""
+        if self.game is None:
+            return
+        game, self.game = self.game, None
+        game.stop()
 
     # ---------- 全局操作 ----------
 
@@ -322,6 +368,8 @@ class PetApp:
         """右键「关掉这只」：只收掉这一只，收掉最后一只才真的退出程序。"""
         if win not in self.windows:
             return
+        if self.game is not None and self.game.win is win:
+            self.stop_game()
         self.windows.remove(win)
         self.events.detach(win)   # 先摘引用，否则事件还会往已关闭的窗口上打
         win.shutdown()
@@ -337,6 +385,9 @@ class PetApp:
         self._hidden = hidden
         for win in self.windows:
             win.setVisible(not hidden)
+        if self.game is not None:
+            # 篮筐和计分徽章也是独立顶层窗口，不跟着藏会留在桌面上
+            self.game.set_visible(not hidden)
         print(f"[pet] 宠物已{'隐藏' if hidden else '显示'}", flush=True)
 
     def reset_all_home(self) -> None:
@@ -344,6 +395,7 @@ class PetApp:
             win.reset_home()
 
     def reload(self) -> None:
+        self.stop_game()   # 先收掉投篮局：它的两个窗口挂在旧宠物窗口上
         try:
             cfg = PetConfig.load(CONFIG_FILE)
         except Exception as exc:  # noqa: BLE001
@@ -371,6 +423,7 @@ class PetApp:
 
     def quit(self) -> None:
         self._pose_timer.stop()
+        self.stop_game()
         self.events.stop()
         for win in self.windows:
             win.shutdown()

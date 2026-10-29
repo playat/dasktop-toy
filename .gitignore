@@ -22,6 +22,8 @@ dist
 temp/
 *.tmp
 *.log
+# 投篮最高分（本机成绩，不进 git）
+basket-score.json
 
 # ── IDE / 系统 ──
 .idea/

@@ -111,6 +111,13 @@ class PetWindow(QWidget):
         self.home_provider = None
         self.peers_provider = None
 
+        # 投篮游戏挂上来的钩子（没接就全是 None，抛掷行为跟以前一模一样）
+        self.on_shot_start = None   # 甩出去那一刻 = 一投开始
+        self.on_throw_step = None   # 飞行每一帧：(上一帧身体中心, 当前帧身体中心)
+        self.on_shot_land = None    # 落地静止 = 一投结束
+        self.game_lock = False      # 游戏进行中：不自己走位/转身（跑掉了玩家抓不到）
+        self.followers: list = []   # 每帧跟着窗口走的挂件（游戏里的计分徽章从这里订阅）
+
         # 说话气泡（由 EventDirector 挂上来；没挂就是纯动画）
         self.bubble = None
         # DSH 第三方占用锁：true = 不自己掷骰、不自己走（显式点播照常）
@@ -210,11 +217,28 @@ class PetWindow(QWidget):
         self.external_lock = bool(on)
         if self.external_lock:
             self._stop_move()
+            self._end_shot()
             self._throw = None
             self._gap_timer.stop()
         elif not self._gap_timer.isActive() and self.state not in ("drag", "throw"):
             # 占用方把控制权还回来：别干等着，按正常节奏接着自己动
             self._schedule_next("idle")
+
+    def set_game_lock(self, on: bool) -> None:
+        """投篮游戏锁：只掐「自己乱走乱转身」，显式点播、拖拽、抛掷照常。
+
+        不加这个的话，投完落地宠物会按随机链自己走开/转身，玩家每次都得先追上去。
+        """
+        self.game_lock = bool(on)
+        if not self.game_lock:
+            if not self._gap_timer.isActive() and self.state not in ("drag", "throw"):
+                self._schedule_next("idle")
+            return
+        self._gap_timer.stop()
+        if self.state in ("drag", "throw"):
+            return
+        self._stop_move()
+        self._hold_idle()
 
     def set_sound(self, path: Path | None) -> None:
         self.click_sound = path
@@ -287,6 +311,10 @@ class PetWindow(QWidget):
             return
         if self.external_lock:
             # 被第三方占用：只保持当前画面，不自己开新动作（显式点播/点击回应照常走别的入口）
+            return
+        if self.game_lock:
+            # 投篮游戏进行中：站着等玩家来抓，不自己走位/转身（落地后回到待机循环就够了）
+            self._hold_idle()
             return
         # 被拖/被甩期间攒下的状态动画，落回地面就补上
         if self._status_anim is not None and self._apply_status():
@@ -500,6 +528,23 @@ class PetWindow(QWidget):
         self.state = "throw"
         self._throw = physics.ThrowState(float(self.x()), float(self.y()), vx, vy)
         self._throw_last = time.monotonic()
+        if self.on_shot_start is not None:
+            self.on_shot_start()
+
+    def _end_shot(self) -> None:
+        """这一投到此为止（被抓住 / 被第三方占用），游戏那边要把「飞行中」的锁放掉。"""
+        if self.on_shot_land is not None:
+            self.on_shot_land()
+
+    def abort_throw(self) -> None:
+        """半路收掉这一投、落回待机。
+
+        投篮命中后回位用：球已经进了就别让它在墙上/地上再弹好几秒才回去。
+        不调 `_end_shot`——那会把「一投结束」再报给游戏一次，庆祝会播两遍。
+        """
+        self._throw = None
+        self.state = "idle"
+        self._play_idle()
 
     def _drive_throw(self) -> None:
         if self._throw is None:
@@ -516,6 +561,7 @@ class PetWindow(QWidget):
         self._follow_screen()
 
         before_vy = self._throw.vy
+        prev_center = self._body_center(self._throw.x, self._throw.y)
         state, bounced, at_rest = physics.throw_step(self._throw, dt, self._bounds, self._phys)
 
         # 宠物间碰撞（配置 physics.petCollision）：飞行中撞到别的宠物 → 双方按动量弹开
@@ -531,10 +577,16 @@ class PetWindow(QWidget):
         self._throw = state
         self.move(round(state.x), round(state.y))
 
+        # 投篮判定：喂「上一帧中心 → 当前帧中心」的线段（扫掠），交给游戏扫筐口
+        if self.on_throw_step is not None:
+            self.on_throw_step(prev_center, self._body_center(state.x, state.y))
+
         if at_rest:
             self._throw = None
             self.state = "idle"
             self._idle_then("throw")
+            # 放在 _idle_then 之后：否则待机的 _play() 会把庆祝动作一口气掐掉
+            self._end_shot()
 
     def _bounce_off_peers(self, state: physics.ThrowState) -> physics.ThrowState:
         """本帧自己被甩出去时撞到别的宠物 → 改写自己的速度 + 通知对方以新初速飞出去。
@@ -567,6 +619,16 @@ class PetWindow(QWidget):
         return physics.body_box(
             float(self.x()), float(self.y()), float(self.width()), float(self.height())
         )
+
+    def _body_center(self, x: float, y: float) -> tuple[float, float]:
+        """身体命中框的中心（不是窗口中心：窗口脚下还有一条透明留白）。
+
+        投篮判定拿它当球心，跟 physics.body_box 的 640×360 比例保持同一套语义。
+        """
+        left, top, right, bottom = physics.body_box(
+            float(x), float(y), float(self.width()), float(self.height())
+        )
+        return (left + right) / 2.0, (top + bottom) / 2.0
 
     def throw_velocity(self) -> tuple[float, float]:
         """当前速度；没在飞行就是 0（被撞时当作静止目标）。"""
@@ -679,6 +741,16 @@ class PetWindow(QWidget):
         self._cur, self._prev, self._fade = current, previous, fade
         if self.bubble is not None:
             self.bubble.follow(self.geometry())
+        # 跟着窗口走的挂件（投篮游戏的计分徽章）：每帧贴位，抛掷时也不会掉队
+        if self.followers:
+            geo = self.geometry()
+            for cb in list(self.followers):
+                try:
+                    cb(geo)
+                except RuntimeError:
+                    # 挂件已经被销毁（关掉这只 / 结束游戏）：自己摘掉，别每帧报错
+                    if cb in self.followers:
+                        self.followers.remove(cb)
         needs = current is not None and (current is not self._last_drawn or fade < 1.0)
         # 挤压动画进行中要持续重绘
         if time.monotonic() - self._squash_t0 < SQ_DURATION_SEC:
@@ -742,6 +814,8 @@ class PetWindow(QWidget):
             return
 
         # 抓住飞行中的宠物 / 打断走位
+        if self._throw is not None:
+            self._end_shot()  # 半路被抓：这一投就到此为止，游戏那边把飞行锁放掉
         self._throw = None
         self._stop_move()
 

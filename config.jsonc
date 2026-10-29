@@ -17,6 +17,7 @@
 //
 // 本文件的顶层键：
 //   pets / physics / moves / noMirror / animationWeights / animGap / confineToScreen  窗口与手感
+//   basketball                                                            投篮小游戏（右键菜单开局）
 //   font / events / eventsRefreshSec / workStatusTexts / memes              说话与联动
 //   dsh（含余额直连参数）/ session（会话日志观察）/ ai（本机模型）            数据源
 // 仍然没有实现的字段在文件末尾的块注释里备查（代码不读）。
@@ -253,6 +254,40 @@
     "longPauseChance": 0.12,
     "longPauseMs": 12000,
     "loadInfluence": 0.6
+  },
+
+  // ===================== 投篮小游戏（右键菜单「投篮游戏」） =====================
+  // 玩法：菜单开局 → 筐出现在宠物的另一边（宠物在左半屏出右边，反之出左边）→ 拖动宠物甩向筐口 → 飞行中身体中心穿过判定圆计分。
+  //   · 筐可以左键拖到桌面任何位置；右键筐 = 分数 / 回到宠物旁边 / 结束投篮游戏
+  //   · 分数常驻宠物头顶，命中时上方飘 +N；一投只计一次
+  //   · 最高分存在 basket-score.json（和 exe 同一层目录），破了纪录才写盘
+  //   · 游戏进行中宠物不会自己走位/转身（不然每次都得追上去），投完立刻可以再抓
+  //   · 命中后宠物会回到这一投的起点（returnHome），默认落地 220ms 后「嗖」回去；
+  //     这几百毫秒里你要是又把它抓起来了，就不抢鼠标、让它跟着手走
+  //
+  // 判定几何全部用比例，换图/改尺寸都不用动代码：
+  //   mouthX / mouthY  筐口中心在篮筐窗口里的位置（0~1，占位蓝框按这个画圈）
+  //   mouthRatio       筐口内径 / 窗口宽度
+  //   hitRatio         判定半径 / 筐口半径（0.55 = 比筐口小一圈，擦边也能进）
+  //   perfectRatio     满分圈 / 判定半径（0.2 = 中心区给 10 分，往外线性落到 1 分）
+  //
+  // 换图：把图丢到 assets/pic/basket.png（或改下面的 image），下次开局就用图，
+  // 占位蓝框和「篮筐·占位」字样自动消失。宽高以 width 为准、高度按图的比例走，不会拉伸。
+  "basketball": {
+    "enabled": true,
+    "image": "assets/pic/basket.png",
+    "width": 260,
+    "height": 260,
+    "mouthRatio": 0.72,
+    "mouthX": 0.5,
+    "mouthY": 0.42,
+    "hitRatio": 0.55,
+    "perfectRatio": 0.2,
+    "badgeOffset": 8,
+    "celebrateAnim": "点击回应/点击回应-开心跃动",
+    "returnHome": true,
+    "returnDelayMs": 220,
+    "showRings": false
   }
 }
 

@@ -40,10 +40,27 @@ PySide6 桌宠（零 Electron / 零 Node），重构自 PC2005-cloud/dsh-pet。�
 
 ## 菜单结构
 
-根：`动作`（首项是表情包子菜单）/ 大小 / 固定原地 / 回到初始位置 / 重载配置 / 碎碎念 / 说句话… /
-刷新余额 / 再来一只 / 退出。`build_menu(extra=, action_extra=, quit_text=)`。
+根：`动作`（首项是表情包子菜单）/ 大小 / 固定原地 / **投篮游戏** / 回到初始位置 / 重载配置 / 碎碎念 /
+说句话… / 刷新余额 / 再来一只 / 退出。`build_menu(extra=, action_extra=, game_action=, quit_text=)`。
 **多开时末项改「关掉这只」** → `main.close_pet(win)`（最后一只才 `quit()`）；
 events 的 key 是 `pet_id#N`，关窗口必须 `events.detach(win)`，否则事件打到已删窗口 → RuntimeError。
+
+## 投篮游戏（`basket.py`）
+
+一把梭全在这个文件：`BasketWindow`（筐，可拖/右键菜单/命中波纹）+ `ScoreBadge`（头顶计分+飘字，
+不吃鼠标）+ `BasketGame`（控制器）。判定纯函数在 `physics`：`segment_point_distance` /
+`score_for_distance`（u≤0.2 满分，线性到 1 分）。
+
+- 接入面：`window` 上的 `on_shot_start / on_throw_step / on_shot_land` 三个钩子 + `game_lock`
+  + `followers`（每帧贴位）。**游戏逻辑一律不写进 window.py**，那边只负责"喂坐标"。
+- 计分取这一投离筐心的**最近距离**（进圈后继续记 min，出圈或落地才结算），不是入口那一点。
+- 最高分 `basket-score.json` 落在 `HERE`（exe 同级/工程根），已进 `.gitignore`。
+- 命中回位：`_settle()` 里排 `_home_timer`（**不等落地**，撞墙弹跳能耗几秒），回位时
+  `win.abort_throw()`（**别调 `_end_shot`**，会重复报一投结束 → 庆祝播两遍）；`state=="drag"` 不抢鼠标。
+  配置 returnHome / returnDelayMs；`_on_shot_land` 里 `_home_timer.isActive()` 就跳过庆祝。
+- 配置段 `basketball`：image / width / mouthRatio / mouthX / mouthY / hitRatio / perfectRatio /
+  badgeOffset / celebrateAnim / showRings。几何全用比例 → 换筐图不用改代码。
+- 收尾不能忘：`close_pet` / `reload` / `quit` / `set_hidden` 都要过 `stop_game()` / `set_visible()`。
 
 ## 余额（只走直连，不看 DSH）
 

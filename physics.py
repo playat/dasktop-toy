@@ -275,6 +275,54 @@ def squash_scale(u: float, squash: float = SQ_SQUASH) -> float:
     return min(SQ_MAX_STRETCH, squash + (1.0 - squash) * max(f, 0.0))
 
 
+# ---- 投篮判定 ----
+
+# 满分圈占判定半径的比例：u ≤ PERFECT 直接给 10 分，往外线性落到 1 分
+SCORE_PERFECT_U = 0.20
+SCORE_MAX = 10
+
+
+def segment_point_distance(
+    p0: tuple[float, float], p1: tuple[float, float], c: tuple[float, float]
+) -> float:
+    """点 c 到线段 p0-p1 的最短距离。
+
+    投掷每帧位移能到十几像素，只判「当前帧中心在不在圈里」会漏判 —— 必须拿
+    「上一帧中心 → 当前帧中心」这条线段去跟判定圆求距离（扫掠检测）。
+    """
+    ax, ay = p0
+    bx, by = p1
+    cx, cy = c
+    dx, dy = bx - ax, by - ay
+    den = dx * dx + dy * dy
+    if den <= 1e-9:
+        return math.hypot(cx - ax, cy - ay)
+    t = ((cx - ax) * dx + (cy - ay) * dy) / den
+    t = min(1.0, max(0.0, t))
+    return math.hypot(cx - (ax + dx * t), cy - (ay + dy * t))
+
+
+def score_for_distance(
+    dist: float, radius: float, perfect: float = SCORE_PERFECT_U, top: int = SCORE_MAX
+) -> int:
+    """身体中心到筐心的距离 → 得分（0 = 没进）。
+
+    u = dist / radius：u≤perfect 满分；0.2~1.0 之间从 top-1 线性降到 1；u>1 不进。
+    半径按「筐口内径 × hitRatio」算，所以手感只由配置的 hitRatio/perfectRatio 决定。
+    """
+    if radius <= 0:
+        return 0
+    u = float(dist) / float(radius)
+    if u > 1.0:
+        return 0
+    perfect = min(max(perfect, 0.0), 0.95)
+    if u <= perfect:
+        return top
+    span = 1.0 - perfect
+    raw = top - (top - 1) * (u - perfect) / span
+    return max(1, min(top, int(round(raw))))
+
+
 def plan_move(
     *,
     x: float,
