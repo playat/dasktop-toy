@@ -38,6 +38,13 @@ PySide6 桌宠（零 Electron / 零 Node），重构自 PC2005-cloud/dsh-pet。�
   间隔 = `random(min,max)` + 动作后 `actionExtraMs` + 偶尔 `longPauseMs`，再 `×(1+loadInfluence×负载)`。
   drag/throw、`_on_gap_elapsed`、`set_external_lock(False)` 走裸 `_schedule_next`；status 那条不加间隔。
 
+## 对话输入框（`saybox.py`）
+
+「说句话…」不再 `QInputDialog`，改成宠物**右侧**的自绘输入条（白底圆角 + 左/右侧小尾巴，投影+描边）。
+挂 `window.followers` 跟随（和计分徽章同一套）；回车发送→`chat()`、Esc/失焦收；`events.close_saybox()`
+在隐藏/关这只/重载时调用。**必须吃键盘所以不能加 `WindowTransparentForInput`**，开时 `activateWindow+setFocus`；
+占位提示自己用浅灰画（样式表会吃掉 `QPalette.PlaceholderText`）。
+
 ## 菜单结构
 
 根：`动作`（首项是表情包子菜单）/ 大小 / 固定原地 / **投篮游戏** / 回到初始位置 / 重载配置 / 碎碎念 /

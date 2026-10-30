@@ -30,7 +30,7 @@ from typing import Any
 
 from PySide6.QtCore import QObject, QTimer, Signal
 from PySide6.QtGui import QAction
-from PySide6.QtWidgets import QInputDialog
+from PySide6.QtWidgets import QMenu
 
 import ai
 import balance as balance_direct
@@ -39,6 +39,7 @@ from bubble import SpeechBubble
 from config import PetConfig
 from dsh import DshBridge
 from memes import MemePool
+from saybox import SayBox
 from session import ReactionPolicy, SessionWatcher
 
 # ---------------- 名字表（与上游 config.jsonc 的 events 池一致） ----------------
@@ -211,6 +212,12 @@ class EventDirector(QObject):
         self._locked: set[str] = set()
         self._history: dict[str, deque[dict[str, str]]] = {}
 
+        # 「说句话…」用的右侧输入条（懒建：不用它就不花那份开销）
+        self._saybox: SayBox | None = None
+        self._saybox_pet: str | None = None
+        self._saybox_win: Any = None
+        self._saybox_follow = None
+
         self._whisper_timer = QTimer(self)
         self._whisper_timer.timeout.connect(self._auto_whisper)
         self._balance_timer = QTimer(self)
@@ -255,6 +262,8 @@ class EventDirector(QObject):
 
     def detach(self, win) -> None:
         """关掉一只宠物时调用：摘掉它的气泡和引用，别让事件再打到已关闭的窗口上。"""
+        if self._saybox is not None and win is self._saybox_win:
+            self._saybox.close_box()  # 输入框正对着这只，跟着一起收
         for key in [k for k, w in self._windows.items() if w is win]:
             bubble = self._bubbles.pop(key, None)
             if bubble is not None:
@@ -265,6 +274,8 @@ class EventDirector(QObject):
             self._ai_busy.discard(key)
 
     def detach_all(self) -> None:
+        if self._saybox is not None:
+            self._saybox.close_box()
         for bubble in self._bubbles.values():
             bubble.close()
         self._bubbles.clear()
@@ -590,9 +601,55 @@ class EventDirector(QObject):
         return meme_menu
 
     def _ask_and_chat(self, pet_id: str | None) -> None:
-        text, ok = QInputDialog.getText(None, "对桌宠说", "说点什么：")
-        if ok and text.strip():
-            self.chat(pet_id, text)
+        """「说句话…」：不再弹模态对话框，直接在宠物旁边开一条输入框。"""
+        win = self._win(pet_id)
+        if win is None:
+            return
+
+        if self._saybox is None:
+            self._saybox = SayBox()
+            self._saybox.submitted.connect(self._on_saybox_submit)
+            self._saybox.dismissed.connect(self._on_saybox_closed)
+            self._saybox_follow = self._saybox.follow
+        box = self._saybox
+
+        self._saybox_pet = pet_id
+        if self._saybox_win is not None and self._saybox_win is not win:
+            self._saybox_unfollow()  # 换了另外一只：先跟旧的解开
+        self._saybox_win = win
+        box.configure(
+            pet_size=win.width(),
+            family=self.cfg.font.family,
+            size=self.cfg.font.size,
+            follow=self.cfg.font.follow_pet,
+        )
+        # 挂在宠物窗口的 followers 上：拖拽/抛掷时输入框也跟着走
+        if self._saybox_follow not in win.followers:
+            win.followers.append(self._saybox_follow)
+        box.open_for(win.geometry())
+
+    def _on_saybox_submit(self, text: str) -> None:
+        pet_id, self._saybox_pet = self._saybox_pet, None
+        self.chat(pet_id, text)
+
+    def _on_saybox_closed(self) -> None:
+        self._saybox_pet = None
+        self._saybox_unfollow()
+
+    def _saybox_unfollow(self) -> None:
+        """把输入框从宠物窗口的 followers 上摘下来（窗口可能已经被销毁）。"""
+        win, self._saybox_win = self._saybox_win, None
+        if win is not None and self._saybox_follow is not None:
+            try:
+                if self._saybox_follow in win.followers:
+                    win.followers.remove(self._saybox_follow)
+            except RuntimeError:  # 宠物窗口已经销毁
+                pass
+
+    def close_saybox(self) -> None:
+        """外部入口（隐藏宠物 / 关掉这只 / 退出）用它把输入框收掉。"""
+        if self._saybox is not None:
+            self._saybox.close_box()
 
     # ---------------- 数据源回调 ----------------
 

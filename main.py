@@ -385,6 +385,8 @@ class PetApp:
         self._hidden = hidden
         for win in self.windows:
             win.setVisible(not hidden)
+        if hidden:
+            self.events.close_saybox()  # 输入框也是独立顶层窗口，藏宠物时一起收
         if self.game is not None:
             # 篮筐和计分徽章也是独立顶层窗口，不跟着藏会留在桌面上
             self.game.set_visible(not hidden)
