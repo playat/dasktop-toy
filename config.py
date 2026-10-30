@@ -211,21 +211,22 @@ class BasketballConfig:
     筐口 → 飞行中身体中心穿过判定圆就计分（1~10）→ 头顶飘 +N。
 
     判定几何（全部相对篮筐窗口，写比例所以换图/换尺寸都不用改代码）：
-        mouth_x / mouth_y   筐口中心在窗口里的位置（0~1）
+        width               篮筐窗口边长（**方形**，图片要求也是正方形，缩到 width 见方）
+        mouth_x / mouth_y   筐口中心在**原图**里的位置（0~1）。窗口放到屏幕右半边会左右镜像，
+                            镜像时 `BasketWindow.mouth_rel_x()` 自动取 `1-mouth_x`
         mouth_ratio         筐口内径 / 窗口宽度
-        hit_ratio           判定半径 / 筐口半径（0.55 ≈ 比筐口小一圈，边缘还能擦进）
-        perfect_ratio       满分圈 / 判定半径（0.2 = 中心 20% 区给 10 分）
+        hit_ratio           判定半径 / 筐口半径（0.9 ≈ 贴着筐口，边缘擦进也算）
+        perfect_ratio       满分圈 / 判定半径（0.28 = 中心 28% 区给 10 分）
     """
 
     enabled: bool = True
     image: str = "assets/pic/basket.png"
-    width: int = 260
-    height: int = 260
-    mouth_ratio: float = 0.72
-    mouth_x: float = 0.5
-    mouth_y: float = 0.42
-    hit_ratio: float = 0.55
-    perfect_ratio: float = 0.20
+    width: int = 240
+    mouth_ratio: float = 0.47
+    mouth_x: float = 0.615
+    mouth_y: float = 0.522
+    hit_ratio: float = 0.9
+    perfect_ratio: float = 0.28
     badge_offset: int = 8
     celebrate_anim: str = "点击回应/点击回应-开心跃动"
     show_rings: bool = False      # 有图之后还想看判定圈就打开（占位蓝框永远画圈）
@@ -385,7 +386,6 @@ def _basketball(raw: dict[str, Any]) -> BasketballConfig:
     if isinstance(raw.get("image"), str):
         cfg.image = raw["image"].strip()
     cfg.width = int(g("width", cfg.width, 80, 1200))
-    cfg.height = int(g("height", cfg.height, 80, 1200))
     cfg.mouth_ratio = g("mouthRatio", cfg.mouth_ratio, 0.10, 1.0)
     cfg.mouth_x = g("mouthX", cfg.mouth_x, 0.0, 1.0)
     cfg.mouth_y = g("mouthY", cfg.mouth_y, 0.0, 1.0)

@@ -4,6 +4,7 @@
 
     BasketWindow  篮筐。有 assets/pic/basket.png 就画图，没有就画蓝框占位。
                   左键拖动、右键菜单（分数 / 回到宠物旁边 / 结束）。
+                  图默认「板在左、篮口朝右」，窗口拖到屏幕右半边会左右镜像让篮口朝内。
     ScoreBadge    宠物头顶常驻分数，命中时上方飘一个 +N。**不吃鼠标**。
     BasketGame    控制器：开局收尾、把窗口钩子接上、判定计分、最高分写盘。
 
@@ -36,6 +37,8 @@ from PySide6.QtGui import (
     QPen,
     QPixmap,
     QPolygonF,
+    QRegion,
+    QTransform,
 )
 from PySide6.QtWidgets import QMenu, QWidget
 
@@ -68,6 +71,27 @@ def load_basket_image(value: str, app_dir: Path, assets_dir: Path) -> QPixmap | 
     return None
 
 
+def fit_square(pix: QPixmap, side: int) -> QPixmap:
+    """把图缩成 side×side 的正方形（篮筐窗口恒为正方形，判定几何全按比例算）。
+
+    篮筐图要求是正方形，方形图直接等比缩到 side 见方；万一给了张长方图也不拉伸——
+    按比例缩进方框并居中，多出来的地方补透明（宁可小一圈，也不要被拉扁）。
+    """
+    if pix.width() == side and pix.height() == side:
+        return pix
+    scaled = pix.scaled(side, side, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+    if scaled.width() == side and scaled.height() == side:
+        return scaled
+    out = QPixmap(side, side)
+    out.fill(Qt.transparent)
+    painter = QPainter(out)
+    painter.drawPixmap(
+        (side - scaled.width()) // 2, (side - scaled.height()) // 2, scaled
+    )
+    painter.end()
+    return out
+
+
 # ---------------------------------------------------------------- 篮筐
 
 
@@ -92,32 +116,110 @@ class BasketWindow(QWidget):
         self._context_pos = None
         self._ripple_t0 = -99.0
 
-        # 有图：宽度按配置，高度跟着图的比例走（不拉伸变形）；没图：用配置尺寸画占位
+        # 窗口恒为正方形、边长 = cfg.width（图片本身是方的，缩到 width 见方即可）。
+        # 万一有人换了张非方图，也不拉伸：按比例缩进方形窗口居中，四周补透明。
         if image is not None and not image.isNull():
-            if image.width() > 0 and image.width() != cfg.width:
-                image = image.scaledToWidth(cfg.width, Qt.SmoothTransformation)
+            image = fit_square(image, cfg.width)
             self._pix: QPixmap | None = image
-            self.resize(image.size())
+            # 预先翻好一份镜像：原图的篮板在左、篮口朝右，放到屏幕右半边时要反过来（篮口朝屏内）
+            self._pix_flip: QPixmap | None = image.transformed(
+                QTransform().scale(-1.0, 1.0)
+            )
+            self.resize(cfg.width, cfg.width)
         else:
             self._pix = None
-            self.resize(cfg.width, cfg.height)
+            self._pix_flip = None
+            self.resize(cfg.width, cfg.width)
 
-        # 只有「画出来的部分」吃鼠标：透明区穿透，宠物停在筐后面照样能抓
-        if self._pix is not None:
-            self.setMask(self._pix.mask())
+        # 三种点选区域（只有不透明的地方吃鼠标）：
+        #   _mask_plain / _mask_flip  两个朝向各自的
+        #   _mask_drag                两者的并集 —— 拖动中用它，翻转时区域不变
+        if self._pix is not None and self._pix_flip is not None:
+            self._mask_plain = QRegion(self._pix.mask())
+            self._mask_flip = QRegion(self._pix_flip.mask())
+            self._mask_drag = self._mask_plain.united(self._mask_flip)
         else:
-            self.setMask(self.rect())
+            self._mask_plain = self._mask_flip = self._mask_drag = QRegion(self.rect())
+
+        self._flipped = False
+        self._mask_now: QRegion | None = None
+        self._apply_mask()
 
         self._ripple = QTimer(self)
         self._ripple.setInterval(16)
         self._ripple.timeout.connect(self._tick_ripple)
 
+    # ---------- 朝向（放在屏幕右半边就镜像） ----------
+
+    def _current_pix(self) -> QPixmap | None:
+        if self._pix is None:
+            return None
+        return self._pix_flip if self._flipped else self._pix
+
+    def _apply_mask(self) -> None:
+        """只有「画出来的部分」吃鼠标：透明区穿透，宠物停在筐后面照样能抓。
+
+        拖动期间改用两个朝向的并集：翻转只换画面、不动区域。否则区域一变，
+        Windows 上这次鼠标抓取会断（而且新区域没盖住光标就彻底不跟手了），
+        表现就是「拖过屏幕中线就卡住」。
+        """
+        if self._press is not None:
+            region = self._mask_drag
+        elif self._flipped:
+            region = self._mask_flip
+        else:
+            region = self._mask_plain
+        if region == self._mask_now:
+            return
+        self._mask_now = region
+        self.setMask(region)
+
+    def set_flipped(self, on: bool) -> None:
+        on = bool(on)
+        if on == self._flipped:
+            return
+        self._flipped = on
+        self._apply_mask()
+        self.update()
+
+    FLIP_DEADBAND = 6  # 压在中线上时留点余量，慢慢拖过去不会来回翻
+
+    def _auto_flip(self) -> None:
+        """窗口中心落在屏幕右半边就镜像（篮口朝屏幕内侧，宠物从左边抛过来才看得见网）。"""
+        app = QGuiApplication.instance()
+        if app is None:
+            return
+        center = self.frameGeometry().center()
+        screen = app.screenAt(center)
+        if screen is None:
+            return
+        dx = center.x() - screen.availableGeometry().center().x()
+        if abs(dx) <= self.FLIP_DEADBAND:
+            return  # 正好压在中线：维持现状
+        self.set_flipped(dx > 0)
+
+    def is_flipped(self) -> bool:
+        return self._flipped
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        self._auto_flip()
+        super().showEvent(event)
+
+    def moveEvent(self, event) -> None:  # noqa: N802
+        self._auto_flip()  # 拖过屏幕中线时跟着翻
+        super().moveEvent(event)
+
     # ---------- 几何（判定只看这两个） ----------
+
+    def mouth_rel_x(self) -> float:
+        """筐口中心在窗口里的横向位置：镜像后左右对调（mouthX 永远按原图写）。"""
+        x = self._cfg.mouth_x
+        return 1.0 - x if self._flipped else x
 
     def mouth_center(self) -> tuple[float, float]:
         """筐口的全局坐标（判定圆圆心）。"""
         return (
-            self.x() + self.width() * self._cfg.mouth_x,
+            self.x() + self.width() * self.mouth_rel_x(),
             self.y() + self.height() * self._cfg.mouth_y,
         )
 
@@ -145,8 +247,9 @@ class BasketWindow(QWidget):
         painter.setRenderHints(
             QPainter.Antialiasing | QPainter.SmoothPixmapTransform | QPainter.TextAntialiasing
         )
-        if self._pix is not None:
-            painter.drawPixmap(self.rect(), self._pix)
+        pix = self._current_pix()
+        if pix is not None:
+            painter.drawPixmap(self.rect(), pix)
             if self._cfg.show_rings:
                 self._paint_rings(painter)
         else:
@@ -155,7 +258,7 @@ class BasketWindow(QWidget):
         painter.end()
 
     def _paint_rings(self, p: QPainter) -> None:
-        cx, cy = self.width() * self._cfg.mouth_x, self.height() * self._cfg.mouth_y
+        cx, cy = self.width() * self.mouth_rel_x(), self.height() * self._cfg.mouth_y
         r = self.hit_radius()
         p.setBrush(Qt.NoBrush)
         p.setPen(QPen(HALO, 1, Qt.DashLine))
@@ -167,7 +270,7 @@ class BasketWindow(QWidget):
     def _paint_placeholder(self, p: QPainter) -> None:
         """蓝框占位：虚线外框 + 筐口 + 网 + 判定圈，图到位后自动不再画。"""
         w, h = self.width(), self.height()
-        cx, cy = w * self._cfg.mouth_x, h * self._cfg.mouth_y
+        cx, cy = w * self.mouth_rel_x(), h * self._cfg.mouth_y
         rx = w * self._cfg.mouth_ratio * 0.5
         ry = rx * 0.42
 
@@ -206,7 +309,7 @@ class BasketWindow(QWidget):
         u = (time.monotonic() - self._ripple_t0) / self.RIPPLE_SEC
         if not (0.0 <= u < 1.0):
             return
-        cx, cy = self.width() * self._cfg.mouth_x, self.height() * self._cfg.mouth_y
+        cx, cy = self.width() * self.mouth_rel_x(), self.height() * self._cfg.mouth_y
         r0 = self.hit_radius()
         p.setBrush(Qt.NoBrush)
         for delay in (0.0, 0.22):
@@ -230,6 +333,7 @@ class BasketWindow(QWidget):
             return
         self._press = event.globalPosition().toPoint()
         self._drag_origin = self._press - self.frameGeometry().topLeft()
+        self._apply_mask()  # 换成并集区域，之后翻转就不用改区域了
         self.setCursor(Qt.ClosedHandCursor)
         event.accept()
 
@@ -253,6 +357,7 @@ class BasketWindow(QWidget):
             return
         self._press = None
         self._drag_origin = None
+        self._apply_mask()  # 松手：区域收回当前朝向的真实形状
         self.unsetCursor()
         event.accept()
 

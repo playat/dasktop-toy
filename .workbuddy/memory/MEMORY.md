@@ -59,7 +59,12 @@ events 的 key 是 `pet_id#N`，关窗口必须 `events.detach(win)`，否则事
   `win.abort_throw()`（**别调 `_end_shot`**，会重复报一投结束 → 庆祝播两遍）；`state=="drag"` 不抢鼠标。
   配置 returnHome / returnDelayMs；`_on_shot_land` 里 `_home_timer.isActive()` 就跳过庆祝。
 - 配置段 `basketball`：image / width / mouthRatio / mouthX / mouthY / hitRatio / perfectRatio /
-  badgeOffset / celebrateAnim / showRings。几何全用比例 → 换筐图不用改代码。
+  badgeOffset / celebrateAnim / showRings / returnHome / returnDelayMs。几何全用比例 → 换筐图不用改代码。
+  **窗口恒为正方形，边长=width（没有 height 字段）**，图也要求正方形；非方图 `fit_square()` 等比缩进方框居中。
+  真图默认 `width=240`、`mouthX=0.615`、`mouthY=0.522`、`mouthRatio=0.47`、`hitRatio=0.9`（R≈51px）。
+- **朝向镜像**：图默认板在左、篮口朝右；窗口中心落在屏幕中线右侧就 `_flipped`（`_pix_flip` 预生成），
+  判定用 `mouth_rel_x()` = `1-mouthX`。`showEvent`/`moveEvent` 里 `_auto_flip()`（拖动中逐帧）；
+  拖动期间 mask 用两向并集 `_mask_drag`，不然 Windows 上中途改区域会断鼠标抓取。
 - 收尾不能忘：`close_pet` / `reload` / `quit` / `set_hidden` 都要过 `stop_game()` / `set_visible()`。
 
 ## 余额（只走直连，不看 DSH）
