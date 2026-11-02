@@ -54,14 +54,20 @@ events 的 key 是 `pet_id#N`，关窗口必须 `events.detach(win)`，否则事
 
 ## 投篮游戏（`basket.py`）
 
-一把梭全在这个文件：`BasketWindow`（筐，可拖/右键菜单/命中波纹）+ `ScoreBadge`（头顶计分+飘字，
-不吃鼠标）+ `BasketGame`（控制器）。判定纯函数在 `physics`：`segment_point_distance` /
-`score_for_distance`（u≤0.2 满分，线性到 1 分）。
+一把梭全在这个文件：`BasketWindow`（筐，可拖/右键菜单/命中波纹）+ `ScorePanel`（筐顶常驻计分板 +
+命中飘字，不吃鼠标）+ `BasketGame`（控制器）。判定纯函数在 `physics`：`segment_point_distance` /
+`score_for_distance`（u≤perfectRatio 满分，线性到 1 分）。
+
+- 计分板贴**筐顶**（不是宠物头顶）：`BasketWindow.on_move` 回调 → `panel.follow(basket.geometry())`，
+  拖筐逐帧跟着走；筐贴屏幕顶时自动翻到筐下面。两行：`本局 N` / `最高 · 累计 · H 中 / G 局`。
 
 - 接入面：`window` 上的 `on_shot_start / on_throw_step / on_shot_land` 三个钩子 + `game_lock`
   + `followers`（每帧贴位）。**游戏逻辑一律不写进 window.py**，那边只负责"喂坐标"。
 - 计分取这一投离筐心的**最近距离**（进圈后继续记 min，出圈或落地才结算），不是入口那一点。
-- 最高分 `basket-score.json` 落在 `HERE`（exe 同级/工程根），已进 `.gitignore`。
+- 成绩记录 `basket-score.json` 落在 `HERE`（exe 同级/工程根），已进 `.gitignore`。
+  格式 `{best, total, hits, games}`（最高单局/累计总分/命中数/局数），开局 + 每次命中都写盘；
+  `read_record()` 对老格式 `{"best":N}`、坏文件、负值全部容错。`BasketGame.best` 是 `rec.best` 的只读 property。
+  **离屏测试要先把 `main.SCORE_FILE` 指到临时路径**，否则读写真文件。
 - 命中回位：`_settle()` 里排 `_home_timer`（**不等落地**，撞墙弹跳能耗几秒），回位时
   `win.abort_throw()`（**别调 `_end_shot`**，会重复报一投结束 → 庆祝播两遍）；`state=="drag"` 不抢鼠标。
   配置 returnHome / returnDelayMs；`_on_shot_land` 里 `_home_timer.isActive()` 就跳过庆祝。

@@ -23,8 +23,10 @@ temp/
 *.tmp
 *.log
 .workbuddy/_out_test/
-# 投篮最高分（本机成绩，不进 git）
+# 投篮成绩记录（本机，不进 git）
 basket-score.json
+# Git Bash / Cygwin 崩溃转储（shell 被强杀时掉在 cwd，跟项目无关）
+*.stackdump
 
 # ── IDE / 系统 ──
 .idea/

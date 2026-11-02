@@ -101,7 +101,8 @@ def _assets_dir() -> Path:
 
 ASSETS = _assets_dir()
 CONFIG_FILE = HERE / "config.jsonc"
-# 投篮最高分（跟 exe 放一起：打包后是 dist/basket-score.json，源码模式是工程根目录）
+# 投篮成绩记录（跟 exe 放一起：打包后是 dist/basket-score.json，源码模式是工程根目录）
+# 内容 {"best":最高单局, "total":累计总分, "hits":命中数, "games":局数}，每次命中都会写
 SCORE_FILE = HERE / "basket-score.json"
 
 

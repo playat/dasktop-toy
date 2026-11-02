@@ -1,12 +1,12 @@
-"""投篮小游戏：可拖动的篮筐 + 宠物头顶计分 + 一投的判定。
+"""投篮小游戏：可拖动的篮筐 + 筐顶计分板 + 一投的判定。
 
 三个部件（都是独立顶层窗口，宠物窗口是分层的，塞不进子控件）：
 
     BasketWindow  篮筐。有 assets/pic/basket.png 就画图，没有就画蓝框占位。
                   左键拖动、右键菜单（分数 / 回到宠物旁边 / 结束）。
                   图默认「板在左、篮口朝右」，窗口拖到屏幕右半边会左右镜像让篮口朝内。
-    ScoreBadge    宠物头顶常驻分数，命中时上方飘一个 +N。**不吃鼠标**。
-    BasketGame    控制器：开局收尾、把窗口钩子接上、判定计分、最高分写盘。
+    ScorePanel    篮筐顶上的常驻计分板（本局/最高/累计/命中/局数），命中时上方飘 +N。**不吃鼠标**。
+    BasketGame    控制器：开局收尾、把窗口钩子接上、判定计分、成绩记录写盘。
 
 判定（纯函数在 physics.py，好单测）：
     投掷每一帧拿「上一帧身体中心 → 当前帧身体中心」的线段跟判定圆求最短距离 d，
@@ -17,7 +17,9 @@
 进圈后一路记「离筐心最近多远」，等它飞出圈（或落地）再按这个最近距离结算 ——
 按入口算的话空心球会被判成擦边分。一投只计一次，命中后上锁。
 
-最高分存成 `<exe 同级>/basket-score.json`（源码模式就是工程根目录），破了才写盘。
+成绩永久记录在 `<exe 同级>/basket-score.json`（源码模式就是工程根目录）：
+`{"best": 30, "total": 120, "hits": 9, "games": 3}` —— 最高单局 / 累计总分 / 命中数 / 局数。
+开局与每次命中都落盘（文件几十字节），程序被强杀也不丢；删掉文件就全部清零。
 """
 
 from __future__ import annotations
@@ -25,6 +27,7 @@ from __future__ import annotations
 import json
 import math
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from PySide6.QtCore import QPointF, QRect, QRectF, Qt, QTimer
@@ -99,6 +102,8 @@ class BasketWindow(QWidget):
     """篮筐：左键拖着走，右键出菜单，命中时筐口扩散一圈波纹。"""
 
     RIPPLE_SEC = 0.45
+
+    on_move = None  # 由 BasketGame 接：计分板贴在筐顶，拖筐时跟着一起挪
 
     def __init__(
         self, cfg: BasketballConfig, image: QPixmap | None, on_menu=None
@@ -207,6 +212,8 @@ class BasketWindow(QWidget):
 
     def moveEvent(self, event) -> None:  # noqa: N802
         self._auto_flip()  # 拖过屏幕中线时跟着翻
+        if self.on_move is not None:
+            self.on_move()  # 计分板跟着挪（拖动时逐帧走这里）
         super().moveEvent(event)
 
     # ---------- 几何（判定只看这两个） ----------
@@ -362,14 +369,18 @@ class BasketWindow(QWidget):
         event.accept()
 
 
-# ---------------------------------------------------------------- 分数徽章
+# ---------------------------------------------------------------- 计分板
 
 
-class ScoreBadge(QWidget):
-    """宠物头顶的常驻分数 + 命中飘字。
+class ScorePanel(QWidget):
+    """篮筐顶上的常驻计分板（长效显示所有指标）+ 命中飘字。
 
-    不吃鼠标（WindowTransparentForInput），也不复用 bubble.SpeechBubble ——
-    那个被会话状态/碎碎念来回占用，游戏分数放进去会被随时打断。
+    两行：
+        本局 18
+        最高 30 · 累计 120 · 9 中 / 3 局
+    贴在筐顶（`BasketWindow.on_move` → `follow()`），拖筐时逐帧跟着走。
+    **不吃鼠标**（WindowTransparentForInput），否则会挡住拖筐；也不复用
+    bubble.SpeechBubble —— 那个被会话状态/碎碎念来回占用，分数放进去会被随时打断。
     """
 
     FLASH_SEC = 0.82
@@ -388,14 +399,17 @@ class ScoreBadge(QWidget):
         self.setFocusPolicy(Qt.NoFocus)
 
         self._family = family or "Microsoft YaHei UI"
-        self._px = max(12, min(40, round(pet_size * 0.0455)))
+        self._px = max(12, min(32, round(pet_size * 0.040)))
         self._offset = int(offset)
         self._score = 0
+        self._best = 0
+        self._total = 0
+        self._hits = 0
+        self._games = 0
         self._flash_text = ""
         self._flash_t0 = -99.0
         self._anchor = QRect()
-
-        self._badge = QRectF()
+        self._panel = QRectF()
         self._float_h = 0
 
         self._timer = QTimer(self)
@@ -407,10 +421,13 @@ class ScoreBadge(QWidget):
 
     # ---------- 数据 ----------
 
-    def set_score(self, score: int) -> None:
-        if score == self._score:
+    def set_data(self, score: int, rec) -> None:
+        """本局分数 + 永久记录（best/total/hits/games）一起刷新。"""
+        new = (int(score), int(rec.best), int(rec.total), int(rec.hits), int(rec.games))
+        old = (self._score, self._best, self._total, self._hits, self._games)
+        if new == old:
             return
-        self._score = int(score)
+        self._score, self._best, self._total, self._hits, self._games = new
         self._relayout()
         self._place()
         self.update()
@@ -433,34 +450,44 @@ class ScoreBadge(QWidget):
 
     # ---------- 布局 / 贴位 ----------
 
+    def _lines(self) -> tuple[str, str]:
+        head = f"本局 {self._score}"
+        sub = (
+            f"最高 {self._best} · 累计 {self._total} · "
+            f"{self._hits} 中 / {self._games} 局"
+        )
+        return head, sub
+
     def _fonts(self) -> tuple[QFont, QFont]:
-        f = QFont(self._family)
-        f.setPixelSize(self._px)
-        big = QFont(self._family)
-        big.setPixelSize(round(self._px * 1.15))
-        big.setBold(True)
-        return f, big
+        head = QFont(self._family)
+        head.setPixelSize(round(self._px * 1.25))
+        head.setBold(True)
+        sub = QFont(self._family)
+        sub.setPixelSize(max(9, round(self._px * 0.78)))
+        return head, sub
 
     def _relayout(self) -> None:
-        f, big = self._fonts()
-        fm = QFontMetrics(f)
-        text = f"分数 {self._score}"
-        pad_x = round(self._px * 0.72)
-        pad_y = round(self._px * 0.34)
-        bw = fm.horizontalAdvance(text) + pad_x * 2
-        bh = fm.height() + pad_y * 2
+        head, sub = self._lines()
+        f_head, f_sub = self._fonts()
+        hfm, sfm = QFontMetrics(f_head), QFontMetrics(f_sub)
+        pad_x = round(self._px * 0.85)
+        pad_y = round(self._px * 0.5)
+        gap = max(1, round(self._px * 0.10))
 
-        bfm = QFontMetrics(big)
-        fw = bfm.horizontalAdvance("+10") + 6
-        self._float_h = bfm.height() + 4
+        bw = max(hfm.horizontalAdvance(head), sfm.horizontalAdvance(sub)) + pad_x * 2
+        bh = hfm.height() + gap + sfm.height() + pad_y * 2
+
+        fw = hfm.horizontalAdvance("+10") + 6
+        self._float_h = hfm.height() + 4
 
         w = int(max(bw, fw)) + 8
-        h = self._float_h + 4 + int(bh)
-        self._badge = QRectF((w - bw) / 2.0, h - bh, bw, bh)
+        h = int(self._float_h) + 4 + int(bh)
+        self._panel = QRectF((w - bw) / 2.0, h - bh, bw, bh)
         if (w, h) != (self.width(), self.height()):
             self.resize(w, h)
 
     def follow(self, anchor: QRect) -> None:
+        """anchor = 篮筐窗口的 geometry（计分板贴在它上面）。"""
         self._anchor = QRect(anchor)
         if self.isVisible():
             self._place()
@@ -469,12 +496,14 @@ class ScoreBadge(QWidget):
         a = self._anchor
         if a.isNull():
             return
-        head = a.top() + round(a.width() * 0.055)
         x = a.center().x() - self.width() // 2
-        y = head - self.height() - self._offset
+        y = a.top() - self.height() - self._offset
         screen = QGuiApplication.screenAt(a.center()) or QGuiApplication.primaryScreen()
         if screen is not None:
             area = screen.availableGeometry()
+            if y < area.top() + 2:
+                # 筐贴着屏幕顶：改挂到筐下面，别糊在筐身上
+                y = a.bottom() + self._offset
             x = max(area.left() + 2, min(x, area.right() - self.width() - 2))
             y = max(area.top() + 2, min(y, area.bottom() - self.height() - 2))
         self.move(int(x), int(y))
@@ -486,17 +515,32 @@ class ScoreBadge(QWidget):
         painter.setRenderHints(
             QPainter.Antialiasing | QPainter.TextAntialiasing | QPainter.SmoothPixmapTransform
         )
-        radius = self._badge.height() / 2.0
-
+        radius = min(self._panel.height() / 2.0, self._px * 1.1)
         painter.setPen(QPen(QColor(55, 138, 221, 90), 1))
         painter.setBrush(QColor(255, 255, 255, 235))
-        painter.drawRoundedRect(self._badge, radius, radius)
+        painter.drawRoundedRect(self._panel, radius, radius)
 
-        f, big = self._fonts()
+        head, sub = self._lines()
+        f_head, f_sub = self._fonts()
+        hfm, sfm = QFontMetrics(f_head), QFontMetrics(f_sub)
+        pad_x = round(self._px * 0.85)
+        pad_y = round(self._px * 0.5)
+        left = self._panel.left() + pad_x
+        width = self._panel.width() - pad_x * 2
+
+        painter.setFont(f_head)
         painter.setPen(INK)
-        painter.setFont(f)
         painter.drawText(
-            self._badge, int(Qt.AlignCenter), f"分数 {self._score}"
+            QRectF(left, self._panel.top() + pad_y, width, hfm.height()),
+            int(Qt.AlignLeft | Qt.AlignVCenter),
+            head,
+        )
+        painter.setFont(f_sub)
+        painter.setPen(QColor(112, 122, 134))
+        painter.drawText(
+            QRectF(left, self._panel.bottom() - pad_y - sfm.height(), width, sfm.height()),
+            int(Qt.AlignLeft | Qt.AlignVCenter),
+            sub,
         )
 
         if self._flash_text:
@@ -506,9 +550,10 @@ class ScoreBadge(QWidget):
             scale = 1.0 + 0.18 * math.sin(min(u / 0.35, 1.0) * math.pi)
             alpha = int(255 * (1.0 - max(0.0, (u - 0.55) / 0.45)))
             painter.setPen(QColor(GOLD.red(), GOLD.green(), GOLD.blue(), max(0, alpha)))
-            big2 = QFont(big)
-            big2.setPixelSize(max(10, round(self._px * 1.15 * scale)))
-            painter.setFont(big2)
+            big = QFont(self._family)
+            big.setPixelSize(max(10, round(self._px * 1.45 * scale)))
+            big.setBold(True)
+            painter.setFont(big)
             area = QRectF(0, -u * self._float_h * 0.9, self.width(), self._float_h + 6)
             painter.drawText(area, int(Qt.AlignCenter), self._flash_text)
         painter.end()
@@ -521,23 +566,55 @@ class ScoreBadge(QWidget):
 # ---------------------------------------------------------------- 控制器
 
 
-def read_best(path: Path) -> int:
+@dataclass
+class Record:
+    """永久记录（`basket-score.json`，跟着 exe 走）：跨会话累计，关掉程序也不丢。
+
+    故意用 JSON 而不是纯数字 txt：以后想加字段（连胜、当日最高…）不用改文件格式。
+    手改也简单，`{"best": 30, "total": 120, ...}`，缺字段按 0 算。
+    """
+
+    best: int = 0    # 历史最高单局
+    total: int = 0   # 历史累计总分
+    hits: int = 0    # 历史命中次数
+    games: int = 0   # 一共开过多少局
+
+
+def read_record(path: Path) -> Record:
+    """读记录。文件不存在 / 坏掉 / 老格式（只有 best）都当 0 处理，绝不因为记分把游戏搞崩。"""
+    rec = Record()
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return 0
-    try:
-        return max(0, int(data.get("best", 0)))
-    except (TypeError, ValueError, AttributeError):
-        return 0
+        return rec
+    if not isinstance(data, dict):
+        return rec
+    for name in ("best", "total", "hits", "games"):
+        try:
+            setattr(rec, name, max(0, int(data.get(name, 0))))
+        except (TypeError, ValueError):
+            pass
+    return rec
 
 
-def write_best(path: Path, best: int) -> None:
-    """只存一个最高分，写失败就算了（下次再破纪录时还会试）。"""
+def write_record(path: Path, rec: Record) -> None:
+    """整份覆盖写。文件就几十字节，每次命中和开局各写一次 —— 中途被关掉也不丢分。"""
     try:
-        path.write_text(json.dumps({"best": int(best)}, ensure_ascii=False) + "\n", encoding="utf-8")
+        path.write_text(
+            json.dumps(
+                {
+                    "best": rec.best,
+                    "total": rec.total,
+                    "hits": rec.hits,
+                    "games": rec.games,
+                },
+                ensure_ascii=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
     except OSError as exc:
-        print(f"[game] 最高分写盘失败：{exc}", flush=True)
+        print(f"[game] 记分写盘失败：{exc}", flush=True)
 
 
 class BasketGame:
@@ -555,11 +632,11 @@ class BasketGame:
         self.cfg = cfg
         self.score_path = score_path
         self.score = 0
-        self.best = read_best(score_path)
+        self.rec = read_record(score_path)  # 永久记录（跨会话）：最高 / 累计 / 命中 / 局数
         self.on_quit = None  # 由 main 接：结束这一局（菜单「结束投篮游戏」）
 
         self.basket = BasketWindow(cfg, image, on_menu=self._show_menu)
-        self.badge = ScoreBadge(family, win.width(), offset=cfg.badge_offset)
+        self.panel = ScorePanel(family, win.width(), offset=cfg.badge_offset)
 
         self._shot = False      # 当前这一投还没落地
         self._scored = False    # 这一投已经计过分（一投只计一次）
@@ -569,6 +646,11 @@ class BasketGame:
         self._home_timer = QTimer()
         self._home_timer.setSingleShot(True)
         self._home_timer.timeout.connect(self._go_home)
+
+    @property
+    def best(self) -> int:
+        """历史最高单局（来自记录文件，跨会话）。"""
+        return self.rec.best
 
     # ---------- 开局 / 收尾 ----------
 
@@ -582,20 +664,26 @@ class BasketGame:
         self.basket.show()
         self.basket.raise_()
 
-        self.badge.set_score(0)
-        self.badge.show()
+        # 开一局就记一笔：局数用来算「平均每局」，中途被关掉也不会漏
+        self.rec.games += 1
+        write_record(self.score_path, self.rec)
+
+        # 计分板贴在筐顶，跟着筐走（不再挂在宠物头上）
+        self.basket.on_move = self._follow_basket
+        self.panel.set_data(self.score, self.rec)
+        self.panel.show()
         # 先 show 再贴位：follow() 对隐藏窗口只记 anchor 不挪位置，顺序反了会闪在屏幕左上角
-        self.badge.follow(self.win.geometry())
+        self.panel.follow(self.basket.geometry())
 
         self.win.on_shot_start = self._on_shot_start
         self.win.on_throw_step = self._on_throw_step
         self.win.on_shot_land = self._on_shot_land
-        self.win.followers.append(self._follow)
         self.win.set_game_lock(True)
 
         print(
             f"[game] 开始投篮 · 筐 @({x},{y}) {self.basket.width()}x{self.basket.height()} "
-            f"判定半径 {self.basket.hit_radius():.0f}px · 最高 {self.best} 分",
+            f"判定半径 {self.basket.hit_radius():.0f}px · 第 {self.rec.games} 局 · "
+            f"最高 {self.rec.best} 分 · 累计 {self.rec.total} 分",
             flush=True,
         )
         return True
@@ -603,32 +691,36 @@ class BasketGame:
     def stop(self) -> None:
         self._home_timer.stop()
         self._home = None
-        if self._follow in self.win.followers:
-            self.win.followers.remove(self._follow)
+        self.basket.on_move = None
         self.win.on_shot_start = None
         self.win.on_throw_step = None
         self.win.on_shot_land = None
         self.win.set_game_lock(False)
 
-        for w in (self.badge, self.basket):
+        for w in (self.panel, self.basket):
             try:
                 w.hide()
                 w.close()
                 w.deleteLater()
             except RuntimeError:
                 pass
-        print(f"[game] 结束投篮 · 本局 {self.score} 分 · 最高 {self.best} 分", flush=True)
+        print(
+            f"[game] 结束投篮 · 本局 {self.score} 分 · 最高 {self.rec.best} 分 · "
+            f"累计 {self.rec.total} 分（{self.rec.hits} 中 / {self.rec.games} 局）",
+            flush=True,
+        )
 
     def set_visible(self, on: bool) -> None:
         """托盘「隐藏全部」时跟着一起藏（不然篮筐和分数会留在桌面上）。"""
-        for w in (self.basket, self.badge):
+        for w in (self.basket, self.panel):
             try:
                 w.setVisible(on)
             except RuntimeError:
                 pass
 
-    def _follow(self, rect: QRect) -> None:
-        self.badge.follow(rect)
+    def _follow_basket(self) -> None:
+        """篮筐挪了（拖动/回位）→ 计分板跟着挪，停在筐顶上方。"""
+        self.panel.follow(self.basket.geometry())
 
     def _initial_pos(self) -> tuple[int, int]:
         """开局把筐放在宠物的**另一边**。
@@ -676,8 +768,10 @@ class BasketGame:
     def _show_menu(self, global_pos) -> None:
         menu = QMenu()
         menu.setStyleSheet(MENU_QSS)
-        info = menu.addAction(f"分数 {self.score} · 最高 {self.best}")
+        info = menu.addAction(f"本局 {self.score} · 最高 {self.rec.best}")
         info.setEnabled(False)
+        hist = menu.addAction(f"累计 {self.rec.total} 分 · {self.rec.hits} 中 / {self.rec.games} 局")
+        hist.setEnabled(False)
         menu.addSeparator()
         home = menu.addAction("回到宠物旁边")
         home.triggered.connect(lambda _checked=False: self._reset_pos())
@@ -775,19 +869,24 @@ class BasketGame:
         self._scored = True
         self._celebrate = True
         self.score += got
-        self.badge.set_score(self.score)
-        self.badge.flash(got)
         self.basket.pop()
 
-        new_best = self.score > self.best
+        # 永久记录：最高单局 + 累计总分 / 命中数，命中一次就落盘（文件几十字节，不值当攒着）
+        new_best = self.score > self.rec.best
         if new_best:
-            self.best = self.score
-            write_best(self.score_path, self.best)
+            self.rec.best = self.score
+        self.rec.total += got
+        self.rec.hits += 1
+        write_record(self.score_path, self.rec)
+
+        # 先刷新数字再飘字，飘的 +N 出现在更新后的面板上
+        self.panel.set_data(self.score, self.rec)
+        self.panel.flash(got)
         # 命中就排队回起点：不等落地 —— 撞墙/落地弹跳能耗好几秒，等它静下来再回去太拖
         if self.cfg.return_home and self._home is not None:
             self._home_timer.start(max(0, self.cfg.return_delay_ms))
         print(
-            f"[game] 命中 +{got} · 距筐心 {dist:.0f}px · 本局 {self.score} 分"
-            f"{' · 新纪录' if new_best else ''}",
+            f"[game] 命中 +{got} · 距筐心 {dist:.0f}px · 本局 {self.score} 分 · "
+            f"累计 {self.rec.total} 分{' · 新纪录' if new_best else ''}",
             flush=True,
         )
