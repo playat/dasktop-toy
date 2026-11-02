@@ -50,6 +50,8 @@
 - **镜像翻转判定要留死区**（`FLIP_DEADBAND=6`）：`|center.x()-mid| <= 6` 直接返回，
   否则贴中线慢慢拖会一帧一翻。
 - PySide6 6.12 的 `QRegion` **没有 `rects()`**（老 API 已删）：数块数 `rectCount()`、比范围 `boundingRect()`。
+- `QPixmap.mask()` 的阈值是 **alpha==0**，不是常见的 128：实测 alpha=1/255 仍算不透明、照样吃鼠标。
+  所以图四周的半透明渐隐边会变成可点区（不是 bug，是阈值特性）；要「点不到」必须 alpha 真为 0。
 
 ## CPU 负载（`_LoadMeter`）
 

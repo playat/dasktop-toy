@@ -215,7 +215,8 @@ class BasketballConfig:
         mouth_x / mouth_y   筐口中心在**原图**里的位置（0~1）。窗口放到屏幕右半边会左右镜像，
                             镜像时 `BasketWindow.mouth_rel_x()` 自动取 `1-mouth_x`
         mouth_ratio         筐口内径 / 窗口宽度
-        hit_ratio           判定半径 / 筐口半径（0.9 ≈ 贴着筐口，边缘擦进也算）
+        hit_ratio           判定半径 / 筐口半径。**允许 >1**：1.3 = 判定圈比筐口大一圈，
+                            相当于把「宠物本身有体积」也算进去（球心擦到筐沿外侧仍算进）
         perfect_ratio       满分圈 / 判定半径（0.28 = 中心 28% 区给 10 分）
     """
 
@@ -225,7 +226,7 @@ class BasketballConfig:
     mouth_ratio: float = 0.47
     mouth_x: float = 0.615
     mouth_y: float = 0.522
-    hit_ratio: float = 0.9
+    hit_ratio: float = 1.3
     perfect_ratio: float = 0.28
     badge_offset: int = 8
     celebrate_anim: str = "点击回应/点击回应-开心跃动"
@@ -372,7 +373,10 @@ def _anim_gap(raw: dict[str, Any]) -> AnimGapConfig:
 
 
 def _basketball(raw: dict[str, Any]) -> BasketballConfig:
-    """`basketball`：投篮游戏。比例类字段夹到 (0,1]，写大了不至于把判定圈撑成整屏。"""
+    """`basketball`：投篮游戏。比例类字段夹到 (0,1]，写大了不至于把判定圈撑成整屏。
+
+    例外是 hitRatio：允许 >1（判定圈比筐口还大，把「球有体积」算进去），夹到 3 倍。
+    """
 
     def g(key: str, fallback: float, low: float, high: float) -> float:
         try:
@@ -389,7 +393,7 @@ def _basketball(raw: dict[str, Any]) -> BasketballConfig:
     cfg.mouth_ratio = g("mouthRatio", cfg.mouth_ratio, 0.10, 1.0)
     cfg.mouth_x = g("mouthX", cfg.mouth_x, 0.0, 1.0)
     cfg.mouth_y = g("mouthY", cfg.mouth_y, 0.0, 1.0)
-    cfg.hit_ratio = g("hitRatio", cfg.hit_ratio, 0.05, 1.0)
+    cfg.hit_ratio = g("hitRatio", cfg.hit_ratio, 0.05, 3.0)
     cfg.perfect_ratio = g("perfectRatio", cfg.perfect_ratio, 0.0, 0.90)
     cfg.badge_offset = int(g("badgeOffset", cfg.badge_offset, 0, 200))
     if isinstance(raw.get("celebrateAnim"), str):

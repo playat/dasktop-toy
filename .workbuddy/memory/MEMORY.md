@@ -68,7 +68,8 @@ events 的 key 是 `pet_id#N`，关窗口必须 `events.detach(win)`，否则事
 - 配置段 `basketball`：image / width / mouthRatio / mouthX / mouthY / hitRatio / perfectRatio /
   badgeOffset / celebrateAnim / showRings / returnHome / returnDelayMs。几何全用比例 → 换筐图不用改代码。
   **窗口恒为正方形，边长=width（没有 height 字段）**，图也要求正方形；非方图 `fit_square()` 等比缩进方框居中。
-  真图默认 `width=240`、`mouthX=0.615`、`mouthY=0.522`、`mouthRatio=0.47`、`hitRatio=0.9`（R≈51px）。
+  真图默认 `width=240`、`mouthX=0.615`、`mouthY=0.522`、`mouthRatio=0.47`、`hitRatio=1.3`（R≈73px）。
+  **hitRatio 允许 >1**（判定圈比筐口大一圈 = 把宠物体积算进去），解析时上界夹到 3.0。
 - **朝向镜像**：图默认板在左、篮口朝右；窗口中心落在屏幕中线右侧就 `_flipped`（`_pix_flip` 预生成），
   判定用 `mouth_rel_x()` = `1-mouthX`。`showEvent`/`moveEvent` 里 `_auto_flip()`（拖动中逐帧）；
   拖动期间 mask 用两向并集 `_mask_drag`，不然 Windows 上中途改区域会断鼠标抓取。
