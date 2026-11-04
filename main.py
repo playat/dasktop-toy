@@ -238,6 +238,9 @@ class PetApp:
         win.pet_key = self.events.attach(spec.id, win)
         self._decorate(win)
         self.windows.append(win)
+        if self.game is not None:
+            # 游戏中途「再来一只」：新来的直接接入同一个筐
+            self.game.attach(win)
         self._refresh_tray_tip()
         return win
 
@@ -302,8 +305,8 @@ class PetApp:
         meme_menu = self.events.meme_menu(pet_key)
         action_extra = [meme_menu] if meme_menu is not None else []
 
-        # 投篮游戏开/关是同一个菜单项：正在玩就显示「结束投篮游戏（N 分）」
-        playing = self.game is not None and self.game.win is win
+        # 投篮游戏全局只有一个筐：任意一只的菜单都显示当前这局的总分，点一下就是结束整局
+        playing = self.game is not None
         game_act = QAction(
             f"结束投篮游戏（{self.game.score} 分）" if playing else "投篮游戏", win
         )
@@ -332,11 +335,14 @@ class PetApp:
     # ---------- 投篮游戏 ----------
 
     def toggle_game(self, win: PetWindow) -> None:
-        """右键「投篮游戏」：这一只正在玩就收掉，否则（先收掉别的局）给这一只开一局。"""
-        if self.game is not None and self.game.win is win:
+        """右键「投篮游戏」。
+
+        **全场只有一个筐**：正在玩就直接收掉（不管右键的是哪一只），没在玩就拿这一只当锚点
+        开局 —— 筐放在它对面，其余宠物自动一起接入，谁投进去都算分。
+        """
+        if self.game is not None:
             self.stop_game()
             return
-        self.stop_game()
 
         if not self.cfg.basketball.enabled:
             print("[game] 配置里 basketball.enabled = false，不开局", flush=True)
@@ -351,6 +357,10 @@ class PetApp:
             win, self.cfg.basketball, image, SCORE_FILE, self.cfg.font.family
         )
         game.on_quit = self.stop_game
+        # 已经开着的其它宠物一起接进来：共用这个筐和这块计分板
+        for other in self.windows:
+            if other is not win:
+                game.attach(other)
         if not game.start():
             game.stop()
             return
@@ -369,8 +379,11 @@ class PetApp:
         """右键「关掉这只」：只收掉这一只，收掉最后一只才真的退出程序。"""
         if win not in self.windows:
             return
-        if self.game is not None and self.game.win is win:
-            self.stop_game()
+        if self.game is not None:
+            # 只让这一只退出游戏：筐留给别的宠物继续玩（一只都不剩才收局）
+            self.game.detach(win)
+            if not self.game.wins:
+                self.stop_game()
         self.windows.remove(win)
         self.events.detach(win)   # 先摘引用，否则事件还会往已关闭的窗口上打
         win.shutdown()

@@ -59,7 +59,7 @@ events 的 key 是 `pet_id#N`，关窗口必须 `events.detach(win)`，否则事
 `score_for_distance`（u≤perfectRatio 满分，线性到 1 分）。
 
 - 计分板贴**筐顶**（不是宠物头顶）：`BasketWindow.on_move` 回调 → `panel.follow(basket.geometry())`，
-  拖筐逐帧跟着走；筐贴屏幕顶时自动翻到筐下面。两行：`本局 N` / `最高 · 累计 · H 中 / G 局`。
+  拖筐逐帧跟着走；筐贴屏幕顶时自动翻到筐下面。两行：`本局 N · 累计 M` / `最高 · H 中 / G 局`。
 
 - 接入面：`window` 上的 `on_shot_start / on_throw_step / on_shot_land` 三个钩子 + `game_lock`
   + `followers`（每帧贴位）。**游戏逻辑一律不写进 window.py**，那边只负责"喂坐标"。
@@ -68,9 +68,14 @@ events 的 key 是 `pet_id#N`，关窗口必须 `events.detach(win)`，否则事
   格式 `{best, total, hits, games}`（最高单局/累计总分/命中数/局数），开局 + 每次命中都写盘；
   `read_record()` 对老格式 `{"best":N}`、坏文件、负值全部容错。`BasketGame.best` 是 `rec.best` 的只读 property。
   **离屏测试要先把 `main.SCORE_FILE` 指到临时路径**，否则读写真文件。
-- 命中回位：`_settle()` 里排 `_home_timer`（**不等落地**，撞墙弹跳能耗几秒），回位时
+- 命中回位：`_settle()` 里给这只宠物排回位定时器（**不等落地**，撞墙弹跳能耗几秒），回位时
   `win.abort_throw()`（**别调 `_end_shot`**，会重复报一投结束 → 庆祝播两遍）；`state=="drag"` 不抢鼠标。
-  配置 returnHome / returnDelayMs；`_on_shot_land` 里 `_home_timer.isActive()` 就跳过庆祝。
+  配置 returnHome / returnDelayMs；`_on_shot_land` 里该宠物定时器 `isActive()` 就跳过庆祝。
+- **多开共用一个筐**（2026-11-04 改）：`BasketGame.wins` 是宠物列表，`anchor` 只是开局那只
+  （决定筐放哪边、计分板字号）。`attach(win)` / `detach(win)` 负责接线+上锁；每只一份 `_Shot`
+  dataclass（live/scored/celebrate/best_d/home/**自己的 QTimer**），回调一律带 `win` 参数。
+  `main.toggle_game` 是**全局开关**（在玩就结束，不管右键哪只）；`close_pet` 走 `detach`，
+  一只不剩才 `stop_game()`；`spawn` 时游戏开着就自动 `attach`。分数是整局共用，不按宠物分账。
 - 配置段 `basketball`：image / width / mouthRatio / mouthX / mouthY / hitRatio / perfectRatio /
   badgeOffset / celebrateAnim / showRings / returnHome / returnDelayMs。几何全用比例 → 换筐图不用改代码。
   **窗口恒为正方形，边长=width（没有 height 字段）**，图也要求正方形；非方图 `fit_square()` 等比缩进方框居中。

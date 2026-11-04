@@ -8,6 +8,10 @@
     ScorePanel    篮筐顶上的常驻计分板（本局/最高/累计/命中/局数），命中时上方飘 +N。**不吃鼠标**。
     BasketGame    控制器：开局收尾、把窗口钩子接上、判定计分、成绩记录写盘。
 
+**一个进程只有一个筐**：多开时所有宠物共用这一个篮筐和这一块计分板，谁投进去都算分。
+控制器挂的是「宠物列表」（`wins`）而不是单只窗口，每只宠物各有自己的一份投掷状态
+（`_Shot`：起点、最近距离、回位定时器），所以两只同时在天上也互不干扰。
+
 判定（纯函数在 physics.py，好单测）：
     投掷每一帧拿「上一帧身体中心 → 当前帧身体中心」的线段跟判定圆求最短距离 d，
     归一化 u = d / R 分档给分。**必须扫掠**：一帧能飞十几像素，只看当前帧在不在
@@ -375,9 +379,9 @@ class BasketWindow(QWidget):
 class ScorePanel(QWidget):
     """篮筐顶上的常驻计分板（长效显示所有指标）+ 命中飘字。
 
-    两行：
-        本局 18
-        最高 30 · 累计 120 · 9 中 / 3 局
+    两行（`·` 分隔，本局和累计同在首行，一眼能看进度）：
+        本局 18 · 累计 120
+        最高 30 · 9 中 / 3 局
     贴在筐顶（`BasketWindow.on_move` → `follow()`），拖筐时逐帧跟着走。
     **不吃鼠标**（WindowTransparentForInput），否则会挡住拖筐；也不复用
     bubble.SpeechBubble —— 那个被会话状态/碎碎念来回占用，分数放进去会被随时打断。
@@ -451,11 +455,8 @@ class ScorePanel(QWidget):
     # ---------- 布局 / 贴位 ----------
 
     def _lines(self) -> tuple[str, str]:
-        head = f"本局 {self._score}"
-        sub = (
-            f"最高 {self._best} · 累计 {self._total} · "
-            f"{self._hits} 中 / {self._games} 局"
-        )
+        head = f"本局 {self._score} · 累计 {self._total}"
+        sub = f"最高 {self._best} · {self._hits} 中 / {self._games} 局"
         return head, sub
 
     def _fonts(self) -> tuple[QFont, QFont]:
@@ -617,8 +618,20 @@ def write_record(path: Path, rec: Record) -> None:
         print(f"[game] 记分写盘失败：{exc}", flush=True)
 
 
+@dataclass
+class _Shot:
+    """一只宠物**当前这一投**的状态。多开时每只各一份，互不干扰。"""
+
+    live: bool = False                   # 这一投还没落地
+    scored: bool = False                 # 这一投已经计过分（一投只计一次）
+    celebrate: bool = False              # 落地后要播一段庆祝
+    best_d: float | None = None          # 这一投到目前为止离筐心最近的距离
+    home: tuple[int, int] | None = None  # 这一投的起点（命中后回这里）
+    timer: QTimer | None = None          # 命中后「回起点」的单次定时器
+
+
 class BasketGame:
-    """一局投篮：管篮筐窗口、计分徽章，以及窗口抛掷事件的判定。"""
+    """一局投篮：管篮筐窗口、计分板，以及**所有参与宠物**的抛掷判定。"""
 
     def __init__(
         self,
@@ -628,7 +641,8 @@ class BasketGame:
         score_path: Path,
         family: str,
     ) -> None:
-        self.win = win
+        self.anchor = win      # 开局那只：决定筐放哪一边、计分板字号
+        self.wins = [win]      # 参与这同一个筐的所有宠物
         self.cfg = cfg
         self.score_path = score_path
         self.score = 0
@@ -637,20 +651,62 @@ class BasketGame:
 
         self.basket = BasketWindow(cfg, image, on_menu=self._show_menu)
         self.panel = ScorePanel(family, win.width(), offset=cfg.badge_offset)
+        self._shots: dict[object, _Shot] = {}  # 宠物 → 这一投的状态
 
-        self._shot = False      # 当前这一投还没落地
-        self._scored = False    # 这一投已经计过分（一投只计一次）
-        self._celebrate = False  # 落地后要播一段庆祝
-        self._best_d: float | None = None  # 这一投到目前为止离筐心最近的距离
-        self._home: tuple[int, int] | None = None  # 这一投的起点（命中后回这里）
-        self._home_timer = QTimer()
-        self._home_timer.setSingleShot(True)
-        self._home_timer.timeout.connect(self._go_home)
+    @property
+    def win(self):
+        """开局那只宠物（历史名字，留着给 main 读）。"""
+        return self.anchor
 
     @property
     def best(self) -> int:
         """历史最高单局（来自记录文件，跨会话）。"""
         return self.rec.best
+
+    # ---------- 参与游戏的多只宠物 ----------
+
+    def attach(self, win) -> None:
+        """再接一只宠物进来：接钩子 + 上游戏锁，它就能对着这同一个筐投了。"""
+        if win in self.wins:
+            return
+        self.wins.append(win)
+        self._wire(win)
+        try:
+            win.set_game_lock(True)
+        except RuntimeError:  # 窗口刚被销毁
+            return
+        print(f"[game] 接入一只宠物 · 共 {len(self.wins)} 只", flush=True)
+
+    def detach(self, win) -> None:
+        """摘掉一只（「关掉这只」）：只收掉它那一投，筐留给别的宠物继续玩。"""
+        if win not in self.wins:
+            return
+        self.wins.remove(win)
+        st = self._shots.pop(win, None)
+        if st is not None and st.timer is not None:
+            st.timer.stop()
+            st.timer.deleteLater()
+        self._unwire(win)
+        try:
+            win.set_game_lock(False)
+        except RuntimeError:
+            pass
+        if self.anchor is win:
+            self.anchor = self.wins[0] if self.wins else win
+        print(f"[game] 摘掉一只宠物 · 还剩 {len(self.wins)} 只", flush=True)
+
+    def _wire(self, win) -> None:
+        """把三只钩子接到这只宠物上（闭包绑死 win，回调里不会认错人）。"""
+        win.on_shot_start = lambda w=win: self._on_shot_start(w)
+        win.on_throw_step = lambda p0, p1, w=win: self._on_throw_step(w, p0, p1)
+        win.on_shot_land = lambda w=win: self._on_shot_land(w)
+
+    def _unwire(self, win) -> None:
+        for name in ("on_shot_start", "on_throw_step", "on_shot_land"):
+            try:
+                setattr(win, name, None)
+            except RuntimeError:  # 窗口已经 deleteLater 掉了
+                return
 
     # ---------- 开局 / 收尾 ----------
 
@@ -675,27 +731,35 @@ class BasketGame:
         # 先 show 再贴位：follow() 对隐藏窗口只记 anchor 不挪位置，顺序反了会闪在屏幕左上角
         self.panel.follow(self.basket.geometry())
 
-        self.win.on_shot_start = self._on_shot_start
-        self.win.on_throw_step = self._on_throw_step
-        self.win.on_shot_land = self._on_shot_land
-        self.win.set_game_lock(True)
+        # 所有参与宠物都接钩子 + 上游戏锁：谁都能对着这同一个筐投
+        for win in list(self.wins):
+            self._wire(win)
+            try:
+                win.set_game_lock(True)
+            except RuntimeError:
+                pass
 
         print(
             f"[game] 开始投篮 · 筐 @({x},{y}) {self.basket.width()}x{self.basket.height()} "
             f"判定半径 {self.basket.hit_radius():.0f}px · 第 {self.rec.games} 局 · "
-            f"最高 {self.rec.best} 分 · 累计 {self.rec.total} 分",
+            f"{len(self.wins)} 只宠物参与 · 最高 {self.rec.best} 分 · 累计 {self.rec.total} 分",
             flush=True,
         )
         return True
 
     def stop(self) -> None:
-        self._home_timer.stop()
-        self._home = None
+        for win in list(self.wins):
+            self._unwire(win)
+            try:
+                win.set_game_lock(False)
+            except RuntimeError:
+                pass
+        for st in self._shots.values():
+            if st.timer is not None:
+                st.timer.stop()
+                st.timer.deleteLater()
+        self._shots.clear()
         self.basket.on_move = None
-        self.win.on_shot_start = None
-        self.win.on_throw_step = None
-        self.win.on_shot_land = None
-        self.win.set_game_lock(False)
 
         for w in (self.panel, self.basket):
             try:
@@ -729,7 +793,9 @@ class BasketGame:
         这样永远隔着宠物一段距离，不会跟宠物挤在同一侧。那一边塞不下（宠物贴着屏边）就退到另一侧，
         两边都塞不下（窄屏 + 大宠物）就挑溢出小的那边贴边放。
         """
-        win = self.win
+        win = self.anchor if self.anchor in self.wins else (self.wins[0] if self.wins else None)
+        if win is None:
+            return 0, 0
         bw, bh = self.basket.width(), self.basket.height()
         app = QGuiApplication.instance()
         screen = app.screenAt(win.frameGeometry().center()) if app else None
@@ -759,6 +825,8 @@ class BasketGame:
         return int(x), int(y)
 
     def _reset_pos(self) -> None:
+        if not self.wins:  # 宠物全关了，没有「旁边」可回
+            return
         x, y = self._initial_pos()
         self.basket.move(x, y)
         self.basket.raise_()
@@ -784,23 +852,35 @@ class BasketGame:
         if self.on_quit is not None:
             QTimer.singleShot(0, self.on_quit)
 
-    # ---------- 一投 ----------
+    # ---------- 一投（每只宠物各走一遍） ----------
 
-    def _on_shot_start(self) -> None:
-        self._shot = True
-        self._scored = False
-        self._celebrate = False
-        self._best_d = None
-        self._home_timer.stop()
+    def _state(self, win) -> _Shot:
+        """取这只宠物这一投的状态；没有就现开一份（筐是共用的，状态不能共用）。"""
+        st = self._shots.get(win)
+        if st is None:
+            st = self._shots[win] = _Shot()
+        return st
+
+    def _on_shot_start(self, win) -> None:
+        st = self._state(win)
+        st.live = True
+        st.scored = False
+        st.celebrate = False
+        st.best_d = None
+        if st.timer is not None:
+            st.timer.stop()
         # 甩出去这一刻的窗口位置 = 这一投的起点（`_start_throw` 先记 ThrowState 再回调，
         # 所以这里读到的还是松手原地，宠物一像素都还没飞出去）
         try:
-            self._home = (self.win.x(), self.win.y())
+            st.home = (win.x(), win.y())
         except RuntimeError:
-            self._home = None
+            st.home = None
 
-    def _on_throw_step(self, p0: tuple[float, float], p1: tuple[float, float]) -> None:
-        if not self._shot or self._scored:
+    def _on_throw_step(
+        self, win, p0: tuple[float, float], p1: tuple[float, float]
+    ) -> None:
+        st = self._state(win)
+        if not st.live or st.scored:
             return
         cx, cy = self.basket.mouth_center()
         radius = self.basket.hit_radius()
@@ -809,56 +889,60 @@ class BasketGame:
             # 还在圈里：先记「到目前为止离筐心最近多远」，别按入口距离急着算分。
             # 一进圈就结算的话，正穿筐心的球也是拿入口那一点的边缘距离（实测 3.7px 的
             # 空心球被判成 4 分），「越准分越高」就废了。
-            self._best_d = dist if self._best_d is None else min(self._best_d, dist)
-        elif self._best_d is not None:
-            self._settle()  # 出圈了：用这一程的最近距离结算
+            st.best_d = dist if st.best_d is None else min(st.best_d, dist)
+        elif st.best_d is not None:
+            self._settle(win, st)  # 出圈了：用这一程的最近距离结算
 
-    def _on_shot_land(self) -> None:
-        was = self._shot
-        self._shot = False
-        if was and self._best_d is not None:
-            self._settle()  # 停在筐里/被抓住：落地这一刻结算
-        if not (was and self._celebrate):
+    def _on_shot_land(self, win) -> None:
+        st = self._state(win)
+        was = st.live
+        st.live = False
+        if was and st.best_d is not None:
+            self._settle(win, st)  # 停在筐里/被抓住：落地这一刻结算
+        if not (was and st.celebrate):
             return
-        self._celebrate = False
-        if self._home_timer.isActive():
+        st.celebrate = False
+        if st.timer is not None and st.timer.isActive():
             return  # 回位的定时器已经排上了：庆祝统一在「回去」那一刻放，别播两遍
         # 排到下一轮：这一帧待机刚起播，立刻放庆祝会被待机的 _play() 掐掉
-        QTimer.singleShot(0, self._celebrate_now)
+        QTimer.singleShot(0, lambda w=win: self._celebrate_now(w))
 
-    def _celebrate_now(self) -> None:
+    def _celebrate_now(self, win) -> None:
         if not self.cfg.celebrate_anim:
             return
         try:
-            self.win.play_effect(self.cfg.celebrate_anim)
+            win.play_effect(self.cfg.celebrate_anim)
         except RuntimeError:  # 宠物窗口已经销毁（「关掉这只」）
             pass
 
-    def _go_home(self) -> None:
+    def _go_home(self, win) -> None:
         """命中后把宠物送回这一投的起点。
 
         · 它还在天上飞（撞墙弹跳能耗好几秒）→ 直接收掉这一投，别让「回去」等太久
         · 这几百毫秒里用户又把它抓起来了 → 不抢鼠标，让它跟着手走
         """
-        home, self._home = self._home, None
+        st = self._shots.get(win)
+        if st is None or win not in self.wins:
+            return
+        home, st.home = st.home, None
         if home is None:
             return
-        self._celebrate = False  # 回位时已经庆祝过，落地别再补一遍
+        st.celebrate = False  # 回位时已经庆祝过，落地别再补一遍
         try:
-            if self.win.state == "drag":
+            if win.state == "drag":
                 return
-            if self.win.state == "throw":
-                self.win.abort_throw()
-            self.win.move(int(home[0]), int(home[1]))
+            if win.state == "throw":
+                win.abort_throw()
+            win.move(int(home[0]), int(home[1]))
             print(f"[game] 命中回位 → ({home[0]},{home[1]})", flush=True)
-            self._celebrate_now()
+            self._celebrate_now(win)
         except RuntimeError:
             return
 
-    def _settle(self) -> None:
-        """按这一投的最近距离结算分数（一投只算一次）。"""
-        dist, self._best_d = self._best_d, None
-        if dist is None or self._scored:
+    def _settle(self, win, st: _Shot) -> None:
+        """按这一投的最近距离结算分数（一投只算一次）。分数是所有宠物共用的一局。"""
+        dist, st.best_d = st.best_d, None
+        if dist is None or st.scored:
             return
         got = physics.score_for_distance(
             dist, self.basket.hit_radius(), self.cfg.perfect_ratio
@@ -866,8 +950,8 @@ class BasketGame:
         if got <= 0:
             return
 
-        self._scored = True
-        self._celebrate = True
+        st.scored = True
+        st.celebrate = True
         self.score += got
         self.basket.pop()
 
@@ -883,8 +967,13 @@ class BasketGame:
         self.panel.set_data(self.score, self.rec)
         self.panel.flash(got)
         # 命中就排队回起点：不等落地 —— 撞墙/落地弹跳能耗好几秒，等它静下来再回去太拖
-        if self.cfg.return_home and self._home is not None:
-            self._home_timer.start(max(0, self.cfg.return_delay_ms))
+        # 定时器一只宠物一个：两只同时命中各回各的起点，谁也不等谁
+        if self.cfg.return_home and st.home is not None:
+            if st.timer is None:
+                st.timer = QTimer()
+                st.timer.setSingleShot(True)
+                st.timer.timeout.connect(lambda w=win: self._go_home(w))
+            st.timer.start(max(0, self.cfg.return_delay_ms))
         print(
             f"[game] 命中 +{got} · 距筐心 {dist:.0f}px · 本局 {self.score} 分 · "
             f"累计 {self.rec.total} 分{' · 新纪录' if new_best else ''}",
