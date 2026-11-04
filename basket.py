@@ -34,12 +34,13 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from PySide6.QtCore import QPointF, QRect, QRectF, Qt, QTimer
+from PySide6.QtCore import QEvent, QPointF, QRect, QRectF, Qt, QTimer
 from PySide6.QtGui import (
     QColor,
     QFont,
     QFontMetrics,
     QGuiApplication,
+    QImage,
     QPainter,
     QPen,
     QPixmap,
@@ -78,21 +79,26 @@ def load_basket_image(value: str, app_dir: Path, assets_dir: Path) -> QPixmap | 
     return None
 
 
-def fit_square(pix: QPixmap, side: int) -> QPixmap:
+def fit_square(img: QImage, side: int) -> QImage:
     """把图缩成 side×side 的正方形（篮筐窗口恒为正方形，判定几何全按比例算）。
 
     篮筐图要求是正方形，方形图直接等比缩到 side 见方；万一给了张长方图也不拉伸——
     按比例缩进方框并居中，多出来的地方补透明（宁可小一圈，也不要被拉扁）。
+
+    注意 side 传的是**设备像素**：不同屏的缩放（1.5 / 1.25）不一样，得按目标屏的
+    DPR 从原图重新缩，否则先按 240 缩好再被 Qt 放大一次，糊得没法看。
     """
-    if pix.width() == side and pix.height() == side:
-        return pix
-    scaled = pix.scaled(side, side, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+    if img.isNull():
+        return img
+    if img.width() == side and img.height() == side:
+        return img
+    scaled = img.scaled(side, side, Qt.KeepAspectRatio, Qt.SmoothTransformation)
     if scaled.width() == side and scaled.height() == side:
         return scaled
-    out = QPixmap(side, side)
+    out = QImage(side, side, QImage.Format_ARGB32_Premultiplied)
     out.fill(Qt.transparent)
     painter = QPainter(out)
-    painter.drawPixmap(
+    painter.drawImage(
         (side - scaled.width()) // 2, (side - scaled.height()) // 2, scaled
     )
     painter.end()
@@ -124,28 +130,30 @@ class BasketWindow(QWidget):
         self._drag_origin = None
         self._context_pos = None
         self._ripple_t0 = -99.0
+        self._pinning = False  # resizeEvent 里钉尺寸时的重入挡板
 
         # 窗口恒为正方形、边长 = cfg.width（图片本身是方的，缩到 width 见方即可）。
-        # 万一有人换了张非方图，也不拉伸：按比例缩进方形窗口居中，四周补透明。
-        if image is not None and not image.isNull():
-            image = fit_square(image, cfg.width)
-            self._pix: QPixmap | None = image
-            # 预先翻好一份镜像：原图的篮板在左、篮口朝右，放到屏幕右半边时要反过来（篮口朝屏内）
-            self._pix_flip: QPixmap | None = image.transformed(
-                QTransform().scale(-1.0, 1.0)
-            )
-            self.resize(cfg.width, cfg.width)
-        else:
-            self._pix = None
-            self._pix_flip = None
-            self.resize(cfg.width, cfg.width)
+        # 位图按**目标屏的 DPR** 现出（见 _build_pix）：同一份原图在 150% 屏上缩成 360
+        # 设备像素，在 125% 屏上缩成 300，都是 1:1 落屏，跨屏不会糊也不会错位。
+        self._src: QImage | None = (
+            image.toImage() if image is not None and not image.isNull() else None
+        )
+        self._pix: QPixmap | None = None
+        self._pix_flip: QPixmap | None = None
+        self._pix_dpr = 0.0
+        self.resize(cfg.width, cfg.width)
+        self._build_pix(self._screen_dpr())
 
         # 三种点选区域（只有不透明的地方吃鼠标）：
         #   _mask_plain / _mask_flip  两个朝向各自的
         #   _mask_drag                两者的并集 —— 拖动中用它，翻转时区域不变
-        if self._pix is not None and self._pix_flip is not None:
-            self._mask_plain = QRegion(self._pix.mask())
-            self._mask_flip = QRegion(self._pix_flip.mask())
+        # 区域一律按**逻辑像素**（240×240）算：Qt 的 setMask 收的就是逻辑坐标，
+        # 换屏后 DPR 变了区域也不该跟着变，只让 Qt 自己换算，别自己乘 DPR 越描越黑。
+        if self._src is not None:
+            plain = QPixmap.fromImage(fit_square(self._src, cfg.width))
+            flip = plain.transformed(QTransform().scale(-1.0, 1.0))
+            self._mask_plain = QRegion(plain.mask())
+            self._mask_flip = QRegion(flip.mask())
             self._mask_drag = self._mask_plain.united(self._mask_flip)
         else:
             self._mask_plain = self._mask_flip = self._mask_drag = QRegion(self.rect())
@@ -158,9 +166,49 @@ class BasketWindow(QWidget):
         self._ripple.setInterval(16)
         self._ripple.timeout.connect(self._tick_ripple)
 
+    # ---------- 屏幕 / DPR ----------
+
+    def _screen_dpr(self) -> float:
+        scr = self.screen() or QGuiApplication.primaryScreen()
+        try:
+            return max(1.0, float(scr.devicePixelRatio())) if scr is not None else 1.0
+        except RuntimeError:
+            return 1.0
+
+    def _build_pix(self, dpr: float) -> None:
+        """按 dpr 把原图重新缩一份位图（设备像素 = 边长 × dpr，逻辑尺寸仍是边长）。"""
+        self._pix_dpr = dpr
+        if self._src is None:
+            self._pix = self._pix_flip = None
+            return
+        side = self._cfg.width
+        dev = max(1, round(side * dpr))
+        img = fit_square(self._src, dev)
+        pix = QPixmap.fromImage(img)
+        pix.setDevicePixelRatio(dpr)
+        flip = QPixmap.fromImage(img.mirrored(True, False))
+        flip.setDevicePixelRatio(dpr)
+        self._pix, self._pix_flip = pix, flip
+
+    def _sync_dpr(self, repaint: bool = True) -> None:
+        """换屏 / 改缩放后重新出图并重下发点选区域。
+
+        跨 DPI 屏时窗口的 DPR 会变（这台机器主屏 1.5、副屏 1.25）：位图不重出就是
+        拿旧的 240 图硬拉，`setMask` 也没重新下发 —— 表现出来就是框被裁成碎片、白边乱飞。
+        """
+        dpr = self._screen_dpr()
+        if abs(dpr - self._pix_dpr) < 0.01:
+            return
+        self._build_pix(dpr)
+        self._mask_now = None
+        self._apply_mask()
+        if repaint:
+            self.update()
+
     # ---------- 朝向（放在屏幕右半边就镜像） ----------
 
     def _current_pix(self) -> QPixmap | None:
+        self._sync_dpr(repaint=False)  # 兜底：万一 DPR 变了还没人通知到
         if self._pix is None:
             return None
         return self._pix_flip if self._flipped else self._pix
@@ -211,10 +259,39 @@ class BasketWindow(QWidget):
         return self._flipped
 
     def showEvent(self, event) -> None:  # noqa: N802
+        self._sync_dpr(repaint=False)  # 开局那只已经站在哪块屏上，就先按那块屏出图
         self._auto_flip()
         super().showEvent(event)
 
+    def changeEvent(self, event) -> None:  # noqa: N802
+        """换屏 / 缩放变了：Qt 会重配 backing store，这时必须重出图 + 重下发点选区域。"""
+        if event.type() in (
+            QEvent.DevicePixelRatioChange,
+            QEvent.ScreenChangeInternal,
+        ):
+            self._sync_dpr()
+            self._auto_flip()
+        super().changeEvent(event)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        """尺寸一律钉回边长。
+
+        跨 DPI 屏时 Qt/Windows 会先给一个按比例硬算的临时尺寸（本机实测 240 → 346 → 241），
+        尺寸一歪，判定圆心、mask、贴图全跟着歪，画面直接碎成块。这里当场钉回去。
+        """
+        side = self._cfg.width
+        if not self._pinning and (self.width() != side or self.height() != side):
+            self._pinning = True
+            try:
+                self.resize(side, side)
+                self._sync_dpr(repaint=False)
+            finally:
+                self._pinning = False
+            self.update()
+        super().resizeEvent(event)
+
     def moveEvent(self, event) -> None:  # noqa: N802
+        self._sync_dpr()  # 拖到另一块屏（DPR 不同）：先按新 DPR 重出图
         self._auto_flip()  # 拖过屏幕中线时跟着翻
         if self.on_move is not None:
             self.on_move()  # 计分板跟着挪（拖动时逐帧走这里）
@@ -414,6 +491,7 @@ class ScorePanel(QWidget):
         self._flash_t0 = -99.0
         self._anchor = QRect()
         self._panel = QRectF()
+        self._want: tuple[int, int] | None = None  # _relayout 算出来的窗口大小（跨屏钉尺寸用）
         self._float_h = 0
 
         self._timer = QTimer(self)
@@ -484,6 +562,7 @@ class ScorePanel(QWidget):
         w = int(max(bw, fw)) + 8
         h = int(self._float_h) + 4 + int(bh)
         self._panel = QRectF((w - bw) / 2.0, h - bh, bw, bh)
+        self._want = (w, h)
         if (w, h) != (self.width(), self.height()):
             self.resize(w, h)
 
@@ -497,6 +576,10 @@ class ScorePanel(QWidget):
         a = self._anchor
         if a.isNull():
             return
+        # 跨 DPI 屏时 Qt 会给个临时尺寸，钉回自己算好的大小（否则文字被裁）
+        if self._want is not None and (self.width(), self.height()) != self._want:
+            self.resize(self._want[0], self._want[1])
+            self.update()
         x = a.center().x() - self.width() // 2
         y = a.top() - self.height() - self._offset
         screen = QGuiApplication.screenAt(a.center()) or QGuiApplication.primaryScreen()

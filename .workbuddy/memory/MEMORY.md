@@ -84,6 +84,13 @@ events 的 key 是 `pet_id#N`，关窗口必须 `events.detach(win)`，否则事
 - **朝向镜像**：图默认板在左、篮口朝右；窗口中心落在屏幕中线右侧就 `_flipped`（`_pix_flip` 预生成），
   判定用 `mouth_rel_x()` = `1-mouthX`。`showEvent`/`moveEvent` 里 `_auto_flip()`（拖动中逐帧）；
   拖动期间 mask 用两向并集 `_mask_drag`，不然 Windows 上中途改区域会断鼠标抓取。
+- **跨屏 DPI（2026-11-04 修）**：本机主屏 T3252U @1.5、副屏 @1.25。跨屏时 Qt 会先给窗口一个
+  按比例硬算的临时尺寸（**实测 240→346→241**），尺寸一歪 `mouth_center/hit_radius/mask` 全跟着歪
+  → 画面碎成块、白边乱飞。三件套修法：①`resizeEvent` 里**钉死** `cfg.width`（`_pinning` 挡重入）；
+  ②`_build_pix(dpr)` 按目标屏 DPR 从**原图**重缩（150%→360px、125%→300px），`setDevicePixelRatio`，
+  跨屏不再糊；③`_sync_dpr()` 换屏时 `_mask_now=None` + 重 `setMask`（旧区域是按旧 DPR 下发的）。
+  mask 永远按**逻辑像素**（240）算，交给 Qt 换算，别自己乘 DPR。
+  `ScorePanel._place()` 里也钉 `_want` 尺寸（跨屏临时尺寸会裁字）。
 - 收尾不能忘：`close_pet` / `reload` / `quit` / `set_hidden` 都要过 `stop_game()` / `set_visible()`。
 
 ## 余额（只走直连，不看 DSH）
