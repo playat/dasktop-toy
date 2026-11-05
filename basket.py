@@ -711,10 +711,15 @@ class _Shot:
     best_d: float | None = None          # 这一投到目前为止离筐心最近的距离
     home: tuple[int, int] | None = None  # 这一投的起点（命中后回这里）
     timer: QTimer | None = None          # 命中后「回起点」的单次定时器
+    retry: QTimer | None = None          # 庆祝重试（那只正被拎着/还在飞时排队）
+    tries: int = 0                       # 重试次数（上限 CELEBRATE_RETRY_MAX，别无限追）
 
 
 class BasketGame:
     """一局投篮：管篮筐窗口、计分板，以及**所有参与宠物**的抛掷判定。"""
+
+    CELEBRATE_RETRY_MS = 180   # 命中庆祝被吃掉时（正被拎/在飞）多久后重试
+    CELEBRATE_RETRY_MAX = 12   # 最多追 12 次 ≈ 2 秒，一直拎着就不追了
 
     def __init__(
         self,
@@ -766,9 +771,11 @@ class BasketGame:
             return
         self.wins.remove(win)
         st = self._shots.pop(win, None)
-        if st is not None and st.timer is not None:
-            st.timer.stop()
-            st.timer.deleteLater()
+        if st is not None:
+            for t in (st.timer, st.retry):
+                if t is not None:
+                    t.stop()
+                    t.deleteLater()
         self._unwire(win)
         try:
             win.set_game_lock(False)
@@ -838,9 +845,10 @@ class BasketGame:
             except RuntimeError:
                 pass
         for st in self._shots.values():
-            if st.timer is not None:
-                st.timer.stop()
-                st.timer.deleteLater()
+            for t in (st.timer, st.retry):
+                if t is not None:
+                    t.stop()
+                    t.deleteLater()
         self._shots.clear()
         self.basket.on_move = None
 
@@ -950,8 +958,11 @@ class BasketGame:
         st.scored = False
         st.celebrate = False
         st.best_d = None
+        st.tries = 0
         if st.timer is not None:
             st.timer.stop()
+        if st.retry is not None:
+            st.retry.stop()
         # 甩出去这一刻的窗口位置 = 这一投的起点（`_start_throw` 先记 ThrowState 再回调，
         # 所以这里读到的还是松手原地，宠物一像素都还没飞出去）
         try:
@@ -984,43 +995,68 @@ class BasketGame:
             self._settle(win, st)  # 停在筐里/被抓住：落地这一刻结算
         if not (was and st.celebrate):
             return
-        st.celebrate = False
         if st.timer is not None and st.timer.isActive():
             return  # 回位的定时器已经排上了：庆祝统一在「回去」那一刻放，别播两遍
         # 排到下一轮：这一帧待机刚起播，立刻放庆祝会被待机的 _play() 掐掉
         QTimer.singleShot(0, lambda w=win: self._celebrate_now(w))
 
     def _celebrate_now(self, win) -> None:
-        if not self.cfg.celebrate_anim:
+        """在**命中的这一只**身上播开心动作（多开时也绝不串到别的宠物身上）。
+
+        它正被拎在手里 / 还在天上飞的时候 play_effect 会被吃掉，所以这里不硬放：
+        退避重试，等它落定再播，别让这次庆祝凭空消失（一直拎着就算了，最多追 2 秒）。
+        """
+        st = self._shots.get(win)
+        if st is None or not st.celebrate:
+            return
+        if not self.cfg.celebrate_anim or win not in self.wins:
+            st.celebrate = False
             return
         try:
-            win.play_effect(self.cfg.celebrate_anim)
+            busy = win.state in ("drag", "throw")
         except RuntimeError:  # 宠物窗口已经销毁（「关掉这只」）
+            st.celebrate = False
+            return
+        if busy:
+            if st.tries >= self.CELEBRATE_RETRY_MAX:
+                st.celebrate = False
+                return
+            st.tries += 1
+            if st.retry is None:
+                st.retry = QTimer()
+                st.retry.setSingleShot(True)
+                st.retry.timeout.connect(lambda w=win: self._celebrate_now(w))
+            st.retry.start(self.CELEBRATE_RETRY_MS)
+            return
+        st.celebrate = False
+        st.tries = 0
+        try:
+            win.play_effect(self.cfg.celebrate_anim)
+        except RuntimeError:
             pass
 
     def _go_home(self, win) -> None:
         """命中后把宠物送回这一投的起点。
 
         · 它还在天上飞（撞墙弹跳能耗好几秒）→ 直接收掉这一投，别让「回去」等太久
-        · 这几百毫秒里用户又把它抓起来了 → 不抢鼠标，让它跟着手走
+        · 这几百毫秒里用户又把它抓起来了 → 不抢鼠标，让它跟着手走（庆祝交给重试）
         """
         st = self._shots.get(win)
         if st is None or win not in self.wins:
             return
         home, st.home = st.home, None
-        if home is None:
-            return
-        st.celebrate = False  # 回位时已经庆祝过，落地别再补一遍
-        try:
-            if win.state == "drag":
+        if home is not None:
+            try:
+                if win.state == "drag":
+                    self._celebrate_now(win)  # 松手后再播，先别丢
+                    return
+                if win.state == "throw":
+                    win.abort_throw()
+                win.move(int(home[0]), int(home[1]))
+                print(f"[game] 命中回位 → ({home[0]},{home[1]})", flush=True)
+            except RuntimeError:
                 return
-            if win.state == "throw":
-                win.abort_throw()
-            win.move(int(home[0]), int(home[1]))
-            print(f"[game] 命中回位 → ({home[0]},{home[1]})", flush=True)
-            self._celebrate_now(win)
-        except RuntimeError:
-            return
+        self._celebrate_now(win)
 
     def _settle(self, win, st: _Shot) -> None:
         """按这一投的最近距离结算分数（一投只算一次）。分数是所有宠物共用的一局。"""

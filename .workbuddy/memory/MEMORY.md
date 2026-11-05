@@ -71,6 +71,10 @@ events 的 key 是 `pet_id#N`，关窗口必须 `events.detach(win)`，否则事
 - 命中回位：`_settle()` 里给这只宠物排回位定时器（**不等落地**，撞墙弹跳能耗几秒），回位时
   `win.abort_throw()`（**别调 `_end_shot`**，会重复报一投结束 → 庆祝播两遍）；`state=="drag"` 不抢鼠标。
   配置 returnHome / returnDelayMs；`_on_shot_land` 里该宠物定时器 `isActive()` 就跳过庆祝。
+- **庆祝只播在命中的那只**：`_celebrate_now(win)` 读 `_shots[win]`，多开不串台（探针实测非开局那只也播）。
+  它正被拎/在飞时 `play_effect` 直接 return（**不是排队**），所以这里加了退避重试
+  `CELEBRATE_RETRY_MS=180 × CELEBRATE_RETRY_MAX=12`（`_Shot.retry/tries`），`_go_home` 遇到
+  `state=="drag"` 也不许再清 `celebrate` 标志（以前清了就永久丢）。`stop()`/`detach()` 要连 retry 一起停。
 - **多开共用一个筐**（2026-11-04 改）：`BasketGame.wins` 是宠物列表，`anchor` 只是开局那只
   （决定筐放哪边、计分板字号）。`attach(win)` / `detach(win)` 负责接线+上锁；每只一份 `_Shot`
   dataclass（live/scored/celebrate/best_d/home/**自己的 QTimer**），回调一律带 `win` 参数。
