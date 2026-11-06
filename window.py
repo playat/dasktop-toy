@@ -142,6 +142,12 @@ class PetWindow(QWidget):
         self._gap_timer.timeout.connect(self._on_gap_elapsed)
         self._load = _LoadMeter()
 
+        # 待机兜底：起身待机后迟迟没人排下一次掷骰（某条分支把 _gap_timer 掐了又没重排），
+        # 到点自己补一次。正常流程 `_schedule_next` 一起来就会把它停掉，所以它只在真断的时候响。
+        self._idle_guard = QTimer(self)
+        self._idle_guard.setSingleShot(True)
+        self._idle_guard.timeout.connect(self._guard_idle)
+
     def _recalc_geometry(self, width: int, height: int) -> None:
         """尺寸变化后重算「身体贴边」边距、地面高度与抛掷边界。"""
         self._side_allow = width * SIDE_ALLOW_RATIO
@@ -275,6 +281,7 @@ class PetWindow(QWidget):
             return False
         # 有新动画上场，之前排好的「歇一会儿再掷骰」作废（否则会从半路把动作掐掉）
         self._gap_timer.stop()
+        self._idle_guard.stop()
         self.state = state
         return True
 
@@ -283,7 +290,15 @@ class PetWindow(QWidget):
         if picked is None:
             return
         name, path = picked
-        self._play(name, path, loop=False, state="idle", on_finish=self._after_oneshot)
+        if not self._play(
+            name, path, loop=False, state="idle", on_finish=self._after_oneshot
+        ):
+            # 抽到的就是**正在循环播的那一条**（待机目录里只有一份素材时必然如此，
+            # player.play 对「同名且还没播完」会拒绝）。这时候画面其实是对的，
+            # 但必须补一次排期 —— 否则 `_gap_timer` 已经在这轮掷骰时消耗掉了，
+            # 再没人起计时器，宠物就会永远停在待机上，怎么等都不换动作。
+            self._idle_then("idle")
+            return
         print(f"[anim] idle → {name}", flush=True)
 
     def _play_action(self) -> None:
@@ -294,6 +309,9 @@ class PetWindow(QWidget):
         name, path = picked
         if self._play(name, path, loop=False, state="action", on_finish=self._after_oneshot):
             print(f"[anim] action → {name}", flush=True)
+        else:
+            # 同名没播完 / 素材打不开：别把调度链断在这儿，照常排下一次
+            self._idle_then("action")
 
     def _play_turn(self) -> None:
         picked = self._anims.turn()
@@ -303,6 +321,8 @@ class PetWindow(QWidget):
         name, path = picked
         if self._play(name, path, loop=False, state="turn", on_finish=self._after_oneshot):
             print(f"[anim] turn → {name}", flush=True)
+        else:
+            self._idle_then("turn")
 
     def _roll_next(self, force_idle: bool = False) -> None:
         if self.state in ("drag", "throw"):
@@ -379,9 +399,26 @@ class PetWindow(QWidget):
             print(f"[anim] hold → {name}", flush=True)
         else:
             self.state = "idle"
+        # 兜底：从这一刻起如果 3 秒内还是没人排下一次掷骰，就自己补（见 _guard_idle）
+        self._idle_guard.start(3000)
+
+    def _guard_idle(self) -> None:
+        """待机兜底：画面已经起身待机，却没有任何定时排期 → 自愈补一次。
+
+        正常链路是 `_after_oneshot → _idle_then → _hold_idle + _schedule_next`，
+        一旦中间某步把 `_gap_timer` 停掉又没重排（`player.play()` 拒绝同名动画、
+        素材打不开、被外部锁打断之类），宠物就会一直循环待机、怎么等都不换动作。
+        """
+        if self.state != "idle" or self.game_lock or self.external_lock:
+            return  # 正在走/在播动作/被锁着：不该插手
+        if self._gap_timer.isActive():
+            return
+        print("[anim] 调度链断过 → 补排下一次掷骰", flush=True)
+        self._schedule_next("idle")
 
     def _schedule_next(self, kind: str = "idle") -> None:
         """排下一次掷骰。kind = 刚播完的是什么，用来决定歇多久。"""
+        self._idle_guard.stop()  # 有正经排期了，兜底计时器就该退场
         gap = self._cfg.anim_gap
         if not gap.enabled:
             self._roll_next()
@@ -483,6 +520,7 @@ class PetWindow(QWidget):
 
         if not self._player.play(action.name, path, loop=False, on_finish=None):
             return False
+        self._idle_guard.stop()  # 走位已经起播，兜底计时器别在走位中途插手
         self.state = "move"
         self.facing = "left" if direction < 0 else "right"
         self._move_t0 = time.monotonic()

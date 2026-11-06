@@ -37,6 +37,11 @@ PySide6 桌宠（零 Electron / 零 Node），重构自 PC2005-cloud/dsh-pet。�
   再 `_schedule_next(kind)` 起 `_gap_timer`**（顺序不能反：`_play()` 会 `_gap_timer.stop()`）。
   间隔 = `random(min,max)` + 动作后 `actionExtraMs` + 偶尔 `longPauseMs`，再 `×(1+loadInfluence×负载)`。
   drag/throw、`_on_gap_elapsed`、`set_external_lock(False)` 走裸 `_schedule_next`；status 那条不加间隔。
+- **待机卡死**（2026-11-06）：`_play_idle()` 抽到的常是**正在 loop 播的那条待机**（`待机/` 只有 1 个素材），
+  `player.play()` 对「同名+未 finished」返回 False，旧码不看返回值 → 不排期 → 永远待机。
+  现在 `_play_idle` 失败时改走 `_idle_then("idle")` 重排；`_play_action/_play_turn` 失败也补排。
+  另有 `_idle_guard`（3s 单次）兜底：`_hold_idle()` 末尾启动、`_schedule_next()`/`_play()`/`_start_move()`
+  一有正经动作就 stop，只在「state==idle 且 gap 没排上」时补排一次。
 
 ## 对话输入框（`saybox.py`）
 
