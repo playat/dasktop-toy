@@ -68,6 +68,11 @@ events 的 key 是 `pet_id#N`，关窗口必须 `events.detach(win)`，否则事
 
 - 接入面：`window` 上的 `on_shot_start / on_throw_step / on_shot_land` 三个钩子 + `game_lock`
   + `followers`（每帧贴位）。**游戏逻辑一律不写进 window.py**，那边只负责"喂坐标"。
+- **`game_lock` 只禁「走位/转身」**（2026-11-11 改）：`_roll_next` 里 `stay = fixed or game_lock`
+  把 turn/move 权重归零，**原地小动作照常**。旧码是 `_hold_idle(); return`，整局只播待机 →
+  玩家以为程序卡死（"一直循环待机"最像这个，先问一句是不是还开着游戏）。解锁/上锁都补一次 `_schedule_next`。
+- 筐拖出所有屏幕后，`mouseReleaseEvent` 调 `_clamp_to_screens()` 推回最近屏留 48px（只在松手时校正，
+  拖动中不动，否则跟鼠标错位）。看不见的筐点不到右键 = 关不掉的游戏。
 - 计分取这一投离筐心的**最近距离**（进圈后继续记 min，出圈或落地才结算），不是入口那一点。
 - 成绩记录 `basket-score.json` 落在 `HERE`（exe 同级/工程根），已进 `.gitignore`。
   格式 `{best, total, hits, games}`（最高单局/累计总分/命中数/局数），开局 + 每次命中都写盘；

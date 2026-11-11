@@ -447,7 +447,30 @@ class BasketWindow(QWidget):
         self._drag_origin = None
         self._apply_mask()  # 松手：区域收回当前朝向的真实形状
         self.unsetCursor()
+        self._clamp_to_screens()  # 拖到全屏外面就推回来（看不见的筐 = 关不掉的游戏）
         event.accept()
+
+    def _clamp_to_screens(self) -> None:
+        """松手后如果筐整个落在所有屏幕之外，推回最近那块屏的边上。
+
+        只在松手时校正，拖动中不动它（拖动中改位置会跟鼠标错位、丢抓取）。
+        至少要留 48px 露在屏内 —— 全隐藏了既看不到筐，也点不到它的右键菜单，
+        游戏却还开着，宠物就被锁在待机里出不来。
+        """
+        geo = self.frameGeometry()
+        screens = QGuiApplication.screens()
+        if not screens or any(s.availableGeometry().intersects(geo) for s in screens):
+            return
+        center = geo.center()
+        near = min(
+            screens, key=lambda s: (s.geometry().center() - center).manhattanLength()
+        )
+        area = near.availableGeometry()
+        keep = min(48, self.width(), self.height())
+        x = min(max(geo.x(), area.left() - self.width() + keep), area.right() - keep)
+        y = min(max(geo.y(), area.top()), area.bottom() - keep)
+        self.move(int(x), int(y))
+        print(f"[game] 筐被拖到屏幕外，已推回 ({x},{y})", flush=True)
 
 
 # ---------------------------------------------------------------- 计分板

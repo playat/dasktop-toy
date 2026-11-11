@@ -231,20 +231,19 @@ class PetWindow(QWidget):
             self._schedule_next("idle")
 
     def set_game_lock(self, on: bool) -> None:
-        """投篮游戏锁：只掐「自己乱走乱转身」，显式点播、拖拽、抛掷照常。
+        """投篮游戏锁：只掐「自己乱走乱转身」，原地小动作、点播、拖拽、抛掷照常。
 
         不加这个的话，投完落地宠物会按随机链自己走开/转身，玩家每次都得先追上去。
+        注意**不是**「整局都站着不动」——那样看着像程序死了（以前就是这么写的）。
         """
         self.game_lock = bool(on)
-        if not self.game_lock:
-            if not self._gap_timer.isActive() and self.state not in ("drag", "throw"):
-                self._schedule_next("idle")
-            return
-        self._gap_timer.stop()
         if self.state in ("drag", "throw"):
-            return
-        self._stop_move()
-        self._hold_idle()
+            return  # 正在被拎/正在飞：落定之后自然按新锁继续
+        if self.game_lock and self.state == "move":
+            self._stop_move()  # 走了一半就停住，别让玩家追着跑
+            self._hold_idle()
+        if not self._gap_timer.isActive():
+            self._schedule_next("idle")
 
     def set_sound(self, path: Path | None) -> None:
         self.click_sound = path
@@ -332,17 +331,17 @@ class PetWindow(QWidget):
         if self.external_lock:
             # 被第三方占用：只保持当前画面，不自己开新动作（显式点播/点击回应照常走别的入口）
             return
-        if self.game_lock:
-            # 投篮游戏进行中：站着等玩家来抓，不自己走位/转身（落地后回到待机循环就够了）
-            self._hold_idle()
-            return
         # 被拖/被甩期间攒下的状态动画，落回地面就补上
         if self._status_anim is not None and self._apply_status():
             return
         w = self._cfg.weights
         idle_w = max(0.0, w.get("idle", 10.0))
-        turn_w = 0.0 if self._fixed else max(0.0, w.get("turn", 5.0))
-        move_w = 0.0 if self._fixed else max(0.0, w.get("move", 5.0))
+        # 固定原地 / 投篮游戏进行中：都不走位、不转身（跑开了玩家抓不到），
+        # 但**原地小动作照常播**。以前游戏锁直接 `_hold_idle(); return`，
+        # 等于整局比赛期间宠物站成雕像 —— 玩家会以为程序卡死了。
+        stay = self._fixed or self.game_lock
+        turn_w = 0.0 if stay else max(0.0, w.get("turn", 5.0))
+        move_w = 0.0 if stay else max(0.0, w.get("move", 5.0))
 
         roll = random.uniform(0.0, 100.0)
         has_turn = self._anims.has_role("turn")
@@ -409,8 +408,8 @@ class PetWindow(QWidget):
         一旦中间某步把 `_gap_timer` 停掉又没重排（`player.play()` 拒绝同名动画、
         素材打不开、被外部锁打断之类），宠物就会一直循环待机、怎么等都不换动作。
         """
-        if self.state != "idle" or self.game_lock or self.external_lock:
-            return  # 正在走/在播动作/被锁着：不该插手
+        if self.state != "idle" or self.external_lock:
+            return  # 正在走/在播动作/被第三方占用：不该插手
         if self._gap_timer.isActive():
             return
         print("[anim] 调度链断过 → 补排下一次掷骰", flush=True)
