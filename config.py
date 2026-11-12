@@ -114,6 +114,7 @@ class DshConfig:
     balance_full: float = 100.0
     balance_home: str = ""
     balance_timeout: float = 30.0
+    balance_proxy: str = "direct"  # direct（默认，直连）/ auto / 具体代理 URL（见 config.jsonc）
 
 
 @dataclass
@@ -426,6 +427,7 @@ def _dsh(raw: dict[str, Any]) -> DshConfig:
         balance_full=_num(raw.get("balanceFull"), 100.0),
         balance_home=str(raw.get("balanceHome") or "").strip(),
         balance_timeout=max(3.0, _num(raw.get("balanceTimeout"), 30.0)),
+        balance_proxy=str(raw.get("balanceProxy") or "direct").strip() or "direct",
     )
 
 

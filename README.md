@@ -332,6 +332,16 @@ Platform），跟 DSH 有没有启动毫无关系 —— 只要凭据在就一�
 | `balanceFull` | `100` | 参考额度（¥）：余额到这个数算「钱袋满溢」，用来折算百分比；填 `0` = 只弹数字、不播动画 |
 | `balanceHome` | `""` | dsh home 目录；空 = `$DSH_HOME` 或 `~/.dsh` |
 | `balanceTimeout` | `30` | 单次请求超时（秒） |
+| `balanceProxy` | `"direct"` | 代理策略：`direct` 直连（默认）；`auto` 跟随系统、本地代理没在监听就自动直连；`127.0.0.1:7890` 指定代理 |
+
+**这个接口国内直连就通，默认不绕代理。** `platform.deepseek.com` 解析到国内 WAF，443 秒连；
+跟着系统代理走反而会踩坑：`urllib` 默认跟随系统代理（环境变量 `https_proxy` > 注册表
+`Internet Settings`），代理软件退出后系统代理常常还指着 `127.0.0.1:7890`，端口却没人监听
+→ 连接被 RST，Windows 报 `WinError 10061`「目标计算机积极拒绝」，看着像 DeepSeek 挂了，
+其实是本地代理死了。所以默认 `direct` 完全无视系统代理。
+
+真要在必须走代理的网络里用，写 `"auto"`：它会认出「回环地址 + WinError 10061」并
+**自动直连重试一次**，日志里有 `[余额] 本地代理 … 没在监听，改直连重试一次`。
 
 开关只有两个：`events.balanceEnabled`（要不要这个功能）和凭据文件在不在。
 读不到凭据就不显示余额入口，日志会说一句「[余额] 读不到 dsh 登录凭据」。
@@ -339,7 +349,7 @@ Platform），跟 DSH 有没有启动毫无关系 —— 只要凭据在就一�
 ⚠ **凭据等同密码**：只读 token 用于请求，不打印、不写日志、不进仓库。
 token 失效（HTTP 401 / `code=40003`）时气泡会直说「请在 dsh 里重新登录」。
 
-`balance.py` 也能单独当命令行用（`python balance.py --watch 300`），
+`balance.py` 也能单独当命令行用（`python balance.py --watch 300`，代理不对就加 `--proxy direct`），
 桌宠这边只是把同一份函数当库调。
 
 ### 2.6 会话状态：从日志里看出它在干什么（`session.py`）

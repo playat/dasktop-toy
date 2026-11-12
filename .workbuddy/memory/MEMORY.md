@@ -114,6 +114,15 @@ events 的 key 是 `pet_id#N`，关窗口必须 `events.detach(win)`，否则事
 - 读 `$DSH_HOME/.credentials.yaml` 的 `deepseek-account-platform/default` token，带 `x-dsh-auth-token`
   请求 `{issuer}/api/v0/users/get_user_summary`。**凭据等同密码：只读不打印**。
 - 结果 `{ok, shape:"money", data:{wallets:[{currency,total,fullBalance}]}}`；`fullBalance`=配置值（0=不折算）。
+- **代理**（2026-11-12）：`platform.deepseek.com` **国内直连就通**（解析到国内 WAF，443 秒连），
+  所以 `dsh.balanceProxy` **默认 `direct`**，完全无视系统代理。绕代理反而出问题：
+  `urllib` 默认跟随系统代理（环境变量 > 注册表 `Internet Settings`），代理软件退出后系统代理常残留
+  `127.0.0.1:7890`，端口没人听 → WinError 10061「积极拒绝」，看着像 DeepSeek 挂了。
+  可选 `auto`（跟随系统 + 回环代理 10061 时自动直连重试）/ 具体 URL。
+- **坑**：重试必须 `_build_request()` 新建 Request —— 走代理时 `Request.set_proxy()` 会改写 host，
+  复用同一个对象重试还是连那个死代理（改了 direct 依然 10061）。
+- 实测（`env https_proxy=http://127.0.0.1:1`）：默认 direct 直接打穿拿到 40003；
+  真实凭据下报 `充值 ¥0 赠金 ¥0`；auto 打一行「改直连重试」后也通；活代理下不误降级。
 
 ## 会话状态（日志观察）
 

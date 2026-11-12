@@ -20,6 +20,10 @@ Platform 的 `get_user_summary` 即可 —— 不需要启动 dsh、不需要 we
     balanceFull: 100      参考额度（¥）：余额到这个数算「钱袋满溢」，0 = 不折算百分比
     balanceHome: ""       dsh home 目录，空 = $DSH_HOME 或 ~/.dsh
     balanceTimeout: 30    单次请求超时（秒）
+    balanceProxy: "direct"  代理策略，见下面 `_proxy_urls`：
+                            direct  直连（默认；这个接口国内直连就通，别绕代理）
+                            auto    跟随系统代理；万一代理是本地回环且没在监听，自动改直连再试
+                            http://127.0.0.1:7890   指定代理（简写 127.0.0.1:7890 也行）
 
 开关只有两个：`events.balanceEnabled`（要不要这个功能）、凭据文件在不在。
 
@@ -48,7 +52,7 @@ from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import ProxyHandler, Request, build_opener, getproxies, urlopen
 
 DEFAULT_ORIGIN = "https://platform.deepseek.com"
 GRANT_KEY = "deepseek-account-platform/default"
@@ -143,18 +147,79 @@ def read_grant(home: str | Path | None = None, key: str = GRANT_KEY) -> dict:
 
 # ---------------------------------------------------------------- 底层：请求
 
+# 「系统代理」指向这些地址 = 本机代理软件（Clash / v2ray 之类）的入口。
+# 代理没开时端口没人监听，连接会被立刻 RST，Windows 报 WinError 10061
+# 「由于目标计算机积极拒绝，无法连接」—— 看着像目标服务器炸了，其实是本地代理死了：
+# `urllib` 默认跟随系统代理（环境变量 HTTP(S)_PROXY > 注册表 Internet Settings），
+# 浏览器可能走的 PAC / 自己的规则，所以只有这个脚本会先崩。
+LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1", "0.0.0.0"}
 
-def fetch_balance(token: str, issuer: str = DEFAULT_ORIGIN, timeout: float = 30.0) -> dict:
-    """请求 get_user_summary 并返回校验过的 biz_data。
 
-    :param token: 凭据文件中的 grant token。
-    :param issuer: 签发该 token 的 Platform origin，必须是同一 origin。
-    :param timeout: 单次请求超时（秒）。
-    :returns: {"normal_wallets": [...], "bonus_wallets": [...], "total_costs": [...]}
-    :raises BalanceQueryError: HTTP 失败、被 WAF 拦截、业务码非 0 或结构不符。
+def _proxy_urls(proxy: str) -> dict[str, str] | None:
+    """配置值 → ProxyHandler 要的映射；None = 用 urllib 默认（跟随系统设置）。
+
+    默认 `direct`：这个接口（platform.deepseek.com）国内直连就通，走代理纯属自找麻烦——
+    代理软件一关、系统代理还留着，请求就先撞上 10061「积极拒绝」。
     """
-    origin = (issuer or DEFAULT_ORIGIN).rstrip("/")
-    request = Request(
+    mode = (proxy or "direct").strip()
+    low = mode.lower()
+    if low in ("", "auto", "system"):
+        return None
+    if low in ("direct", "none", "off", "no", "false"):
+        return {}
+    if "://" not in mode:
+        mode = "http://" + mode
+    return {"http": mode, "https": mode}
+
+
+def _effective_proxy() -> str:
+    """「系统代理」此刻会用的地址（和 urlopen 的判断口径一致，环境变量优先）。"""
+    proxies = getproxies()
+    for key in ("https", "http", "all"):
+        url = proxies.get(key)
+        if url:
+            return str(url)
+    return ""
+
+
+def _is_loopback(url: str) -> bool:
+    """代理地址是不是本机回环（127.0.0.1 / localhost …）。"""
+    host = url.split("://", 1)[-1].split("/", 1)[0]
+    if "@" in host:  # user:pass@host:port
+        host = host.rsplit("@", 1)[1]
+    host = host.rsplit(":", 1)[0] if not host.startswith("[") else host.split("]")[0] + "]"
+    return host.strip("[]").lower() in LOOPBACK_HOSTS
+
+
+def _refused(error: Exception) -> bool:
+    """是不是「连接被拒绝」（本地代理端口没人监听）。"""
+    reason = getattr(error, "reason", error)
+    return (
+        isinstance(reason, ConnectionRefusedError)
+        or "10061" in str(reason)
+        or "积极拒绝" in str(reason)
+    )
+
+
+def _proxy_error(error: Exception, timeout: float) -> BalanceQueryError:
+    """把底层异常翻成一句人话（别让用户对着一串英文猜）。"""
+    if isinstance(error, HTTPError):
+        hint = "（token 可能已失效，请重新登录）" if error.code == 401 else ""
+        return BalanceQueryError(f"HTTP {error.code}{hint}")
+    if isinstance(error, TimeoutError):
+        return BalanceQueryError(f"请求超时（{timeout}s）")
+    reason = getattr(error, "reason", error)
+    proxy = _effective_proxy()
+    if _refused(error) and proxy and _is_loopback(proxy):
+        return BalanceQueryError(
+            f"连不上本地代理 {proxy}（代理软件没开 / 系统代理没关？）"
+            f"—— 原始错误：{reason}"
+        )
+    return BalanceQueryError(f"网络错误：{reason}")
+
+
+def _build_request(origin: str, token: str) -> Request:
+    return Request(
         f"{origin}/api/v0/users/get_user_summary",
         headers={
             "x-dsh-auth-token": token,
@@ -170,16 +235,57 @@ def fetch_balance(token: str, issuer: str = DEFAULT_ORIGIN, timeout: float = 30.
         method="GET",
     )
 
-    try:
+
+def _fetch_once(origin: str, token: str, timeout: float, proxy: str) -> bytes:
+    """按代理策略发一次请求，返回原始响应体（最多再读 1 字节用来判超长）。
+
+    **每次都要新建 Request**：走代理时 `Request.set_proxy()` 会把 host 改写成代理地址，
+    复用同一个对象重试会继续连那个死代理（这就是「改了直连还是 10061」的坑）。
+    """
+    request = _build_request(origin, token)
+    urls = _proxy_urls(proxy)
+    if urls is None:
         with urlopen(request, timeout=timeout) as response:
-            body = response.read(65_536 + 1)
-    except HTTPError as error:
-        hint = "（token 可能已失效，请重新登录）" if error.code == 401 else ""
-        raise BalanceQueryError(f"HTTP {error.code}{hint}") from error
-    except URLError as error:
-        raise BalanceQueryError(f"网络错误：{error.reason}") from error
-    except TimeoutError as error:
-        raise BalanceQueryError(f"请求超时（{timeout}s）") from error
+            return response.read(65_536 + 1)
+    opener = build_opener(ProxyHandler(urls))
+    with opener.open(request, timeout=timeout) as response:
+        return response.read(65_536 + 1)
+
+
+def fetch_balance(
+    token: str,
+    issuer: str = DEFAULT_ORIGIN,
+    timeout: float = 30.0,
+    proxy: str = "direct",
+) -> dict:
+    """请求 get_user_summary 并返回校验过的 biz_data。
+
+    :param token: 凭据文件中的 grant token。
+    :param issuer: 签发该 token 的 Platform origin，必须是同一 origin。
+    :param timeout: 单次请求超时（秒）。
+    :param proxy: `direct`（默认，直连）/ `auto`（跟随系统，回环代理死掉时自动改直连）/ 代理 URL。
+    :returns: {"normal_wallets": [...], "bonus_wallets": [...], "total_costs": [...]}
+    :raises BalanceQueryError: HTTP 失败、被 WAF 拦截、业务码非 0 或结构不符。
+    """
+    origin = (issuer or DEFAULT_ORIGIN).rstrip("/")
+
+    try:
+        body = _fetch_once(origin, token, timeout, proxy)
+    except (HTTPError, URLError, TimeoutError) as error:
+        # auto 模式专治「代理软件关了、系统代理还指着 127.0.0.1:7890」：
+        # 本地端口没人听 → 10061 积极拒绝。这时直连一次往往就通了，
+        # 用户既不用关代理设置，也不用配任何东西。
+        if _proxy_urls(proxy) is None and _refused(error) and _is_loopback(_effective_proxy()):
+            print(
+                f"[余额] 本地代理 {_effective_proxy()} 没在监听，改直连重试一次",
+                flush=True,
+            )
+            try:
+                body = _fetch_once(origin, token, timeout, "direct")
+            except (HTTPError, URLError, TimeoutError) as retry_error:
+                raise _proxy_error(retry_error, timeout) from retry_error
+        else:
+            raise _proxy_error(error, timeout) from error
 
     if len(body) > 65_536:
         raise BalanceQueryError("响应体超过 64KiB，不符合预期")
@@ -325,6 +431,7 @@ def query(cfg) -> dict[str, Any]:
     """
     home = getattr(cfg.dsh, "balance_home", "") or None
     timeout = float(getattr(cfg.dsh, "balance_timeout", 30.0) or 30.0)
+    proxy = getattr(cfg.dsh, "balance_proxy", "direct") or "direct"
 
     if not available(cfg):
         return _fail("找不到 dsh 的登录凭据（先 dsh 登录一次）")
@@ -337,7 +444,7 @@ def query(cfg) -> dict[str, Any]:
         return _fail(f"读凭据出错（{type(exc).__name__}: {exc}）")
 
     try:
-        biz = fetch_balance(grant["token"], grant["issuer"], timeout=timeout)
+        biz = fetch_balance(grant["token"], grant["issuer"], timeout=timeout, proxy=proxy)
         totals = summarize(biz)
     except BalanceQueryError as exc:
         return _fail(str(exc))
@@ -403,7 +510,7 @@ def _once(args: argparse.Namespace) -> int:
         token, issuer = grant["token"], grant["issuer"]
 
     try:
-        biz = fetch_balance(token, issuer, args.timeout)
+        biz = fetch_balance(token, issuer, args.timeout, args.proxy)
     except BalanceQueryError as error:
         print(f"余额查询失败：{error}", file=sys.stderr)
         return 4
@@ -434,6 +541,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--token", metavar="TOKEN", help="直接用给定 token，跳过凭据文件")
     parser.add_argument("--issuer", metavar="URL", default=None, help="配合 --token 指定 Platform origin")
     parser.add_argument("--timeout", type=float, metavar="SEC", default=30.0, help="单次请求超时（默认 30）")
+    parser.add_argument(
+        "--proxy",
+        metavar="MODE",
+        default="direct",
+        help="direct（默认，直连）/ auto（跟随系统、代理死了自动直连）/ 127.0.0.1:7890",
+    )
     args = parser.parse_args(argv)
 
     if args.watch and args.watch > 0:
