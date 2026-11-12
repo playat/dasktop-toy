@@ -33,6 +33,11 @@ PySide6 桌宠（零 Electron / 零 Node），重构自 PC2005-cloud/dsh-pet。�
   单层 >30 自动分页。`path_of()` 先精确匹配再按 stem 兜底。`ASSETS` 探 `HERE/assets` → `HERE/dist/assets`。
 - 窗口 = `pets[0].size`（462）→ 462×260；状态机 idle/action/turn/move/drag/throw/click；
   每只独立解码线程 + fixedEnabled；「大小」不写回配置。落地挤压锚点 = 水平中心 + 脚底。
+- **跨屏尺寸钉死**（2026-11-12）：Qt6 换屏按「保持物理尺寸」补偿，但把 DPR 比值**乘了两遍**
+  （1.5→1.25 应是 ×1.2，实际 ×1.44）：实测窗口瞬间变 665×374，反方向 321×181，看着"突然变大"。
+  `setFixedSize` 挡不住（QWindow 层不走 min/max 约束，只有 QWidget::resize 才 clamp），
+  所以在 `resizeEvent` 里以**中心为锚**复位 + `setUpdatesEnabled(False)` 吞掉中间帧，`_want` 记录目标尺寸
+  （`apply_size()` 是唯一改尺寸的入口）。筐同理，但它是 240 正方形、按 `_cfg.width` 钉死。
 - **动作之间停顿**（`animGap`）：`_after_oneshot` 走 `_idle_then(kind)` = **先 `_hold_idle()` 播待机循环、
   再 `_schedule_next(kind)` 起 `_gap_timer`**（顺序不能反：`_play()` 会 `_gap_timer.stop()`）。
   间隔 = `random(min,max)` + 动作后 `actionExtraMs` + 偶尔 `longPauseMs`，再 `×(1+loadInfluence×负载)`。
@@ -53,8 +58,11 @@ PySide6 桌宠（零 Electron / 零 Node），重构自 PC2005-cloud/dsh-pet。�
 ## 菜单结构
 
 根：`动作`（首项是表情包子菜单）/ 大小 / 固定原地 / **投篮游戏** / 回到初始位置 / 重载配置 / 碎碎念 /
-说句话… / 刷新余额 / 再来一只 / 退出。`build_menu(extra=, action_extra=, game_action=, quit_text=)`。
-**多开时末项改「关掉这只」** → `main.close_pet(win)`（最后一只才 `quit()`）；
+说句话… / 刷新余额 / 再来一只 / 退出。
+`build_menu(extra=, action_extra=, game_action=, quit_text=, on_quit_all=, quit_all_text=)`。
+**多开时倒数第二项「关掉这只」** → `main.close_pet(win)`（最后一只才 `quit()`），
+**最后一项「退出（关掉全部 N 只）」→ `main.quit()`**（2026-11-12 加：任何一只的菜单都能一键全关）；
+单只时只留「退出」，`quit_all_text` 传空串就不出这一项。
 events 的 key 是 `pet_id#N`，关窗口必须 `events.detach(win)`，否则事件打到已删窗口 → RuntimeError。
 
 ## 投篮游戏（`basket.py`）

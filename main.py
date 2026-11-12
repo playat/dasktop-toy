@@ -312,7 +312,8 @@ class PetApp:
         )
         game_act.triggered.connect(lambda _checked=False, w=win: self.toggle_game(w))
 
-        # 只剩一只时「退出」= 结束程序；还有别的宠物时它只关掉右键的这一只
+        # 单只时「退出」就是结束程序；多开时这一项只关右键的这只，
+        # 底下再跟一条「退出（关掉全部 N 只）」——每只宠物的菜单里都能一键全关
         solo = len(self.windows) <= 1
         menu = build_menu(
             None,
@@ -326,6 +327,8 @@ class PetApp:
             on_reload=self.reload,
             on_quit=self.quit if solo else (lambda: self.close_pet(win)),
             quit_text="退出" if solo else "关掉这只",
+            on_quit_all=self.quit,
+            quit_all_text="" if solo else f"退出（关掉全部 {len(self.windows)} 只）",
             extra=extra,
             action_extra=action_extra,
             game_action=game_act,

@@ -104,7 +104,12 @@ class PetWindow(QWidget):
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WA_NoSystemBackground, True)
         self.setAutoFillBackground(False)
-        self.resize(width, height)
+        # 尺寸只认「用户要的这一个」（菜单「大小」才会改）。跨屏时 Qt 会拿物理尺寸反算
+        # 逻辑尺寸、还顺手取整，来回拖一次长 1px：实测拖 8 个来回 462×260 → 463×270。
+        # setFixedSize 让 Qt 那套 DPI 补偿根本没地方下手；resizeEvent 里再兜一道。
+        self._want = (int(width), int(height))
+        self._pinning = False
+        self.setFixedSize(*self._want)
 
         # 回调（由 main 接）：右键菜单 / 「回到初始位置」的目标坐标 / 同屏的其它宠物（互撞用）
         self.on_context_menu = None
@@ -147,6 +152,35 @@ class PetWindow(QWidget):
         self._idle_guard = QTimer(self)
         self._idle_guard.setSingleShot(True)
         self._idle_guard.timeout.connect(self._guard_idle)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        """跨 DPI 换屏时把尺寸钉死回 `self._want`。
+
+        Qt 在窗口换屏时会试着保持"物理尺寸"，拿新屏的 DPR 反算逻辑尺寸，取整又带点偏差：
+        主屏 150% ↔ 副屏 125% 来回拖，462×260 会变成 466×267 → 463×261 → 466×268 ……
+        每过一个来回长 1~2px，拖几次肉眼可见地胖了一圈。尺寸只该由「大小」菜单决定，
+        别的来源（换屏、系统缩放变更）一律改回去。
+        """
+        want = self._want
+        got = (self.width(), self.height())
+        if not self._pinning and got != want:
+            # Qt 6 在换屏时会把「1.5 → 1.25」这个比值**算两遍**（1.2² = 1.44）：
+            # 实测拖过去瞬间窗口被拉成 665×374，再拖回来又缩成 321×181。
+            # 复位要在 super() 之前做完，并且在关掉更新的状态下改，别让中途那一帧画出来。
+            self._pinning = True
+            try:
+                self.setUpdatesEnabled(False)
+                # 以中心为锚复位：Qt 改尺寸是保左上角的，宠物会顺带往右下窜一截，
+                # 保持中心至少不跳位（拖动下一帧还会按鼠标位置重排）。
+                cx, cy = self.geometry().center().x(), self.geometry().center().y()
+                self.move(cx - want[0] // 2, cy - want[1] // 2)
+                self.resize(*want)
+            finally:
+                self.setUpdatesEnabled(True)
+                self._pinning = False
+            self.update()
+            print(f"[pet] 跨屏尺寸纠偏 {got[0]}x{got[1]} → {want[0]}x{want[1]}", flush=True)
+        super().resizeEvent(event)
 
     def _recalc_geometry(self, width: int, height: int) -> None:
         """尺寸变化后重算「身体贴边」边距、地面高度与抛掷边界。"""
@@ -724,7 +758,9 @@ class PetWindow(QWidget):
 
         self._throw = None
         self._stop_move()
-        self.resize(width, height)
+        # 先认下新尺寸，再 setFixedSize —— 否则 resizeEvent 会把这次改尺寸当成跨屏漂移又纠回去
+        self._want = (width, height)
+        self.setFixedSize(width, height)
         self._recalc_geometry(width, height)
         self.move(int(feet_x - width / 2), int(feet_y - height * FEET_Y_RATIO))
         if self.bubble is not None:

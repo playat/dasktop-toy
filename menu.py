@@ -27,7 +27,8 @@
     回到初始位置
     重载配置
     碎碎念 / 说句话… / 刷新余额          ← events.EventDirector 注入（`extra`）
-    退出                                 ← 开了多只时改叫「关掉这只」（`quit_text`）
+    退出                                 ← 单只时就是这个；多开时这里是「关掉这只」，
+                                           下面再加一条「退出（关掉全部 N 只）」
 
 「动作」里的注入项走 `action_extra`（可以是 QAction，也可以是整块 QMenu）。
 
@@ -156,6 +157,8 @@ def build_menu(
     on_reload: Callable[[], None],
     on_quit: Callable[[], None],
     quit_text: str = "退出",
+    on_quit_all: Callable[[], None] | None = None,
+    quit_all_text: str = "",
     extra: list[QAction] | None = None,
     action_extra: list[QAction | QMenu] | None = None,
     game_action: QAction | None = None,
@@ -220,5 +223,12 @@ def build_menu(
     quit_act = QAction(quit_text, menu)
     quit_act.triggered.connect(lambda _checked=False: on_quit())
     menu.addAction(quit_act)
+
+    # 多开时下面再压一条「退出（关掉全部 N 只）」：每只宠物的菜单里都能一键全关，
+    # 不用先一只一只「关掉这只」。单只时 `quit_all_text` 为空，不出现。
+    if quit_all_text and on_quit_all is not None:
+        all_act = QAction(quit_all_text, menu)
+        all_act.triggered.connect(lambda _checked=False: on_quit_all())
+        menu.addAction(all_act)
 
     return menu
