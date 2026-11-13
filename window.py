@@ -100,7 +100,6 @@ class PetWindow(QWidget):
         # 抛掷
         self._throw: physics.ThrowState | None = None
         self._throw_last = 0.0
-        self._throw_shot = False  # 这一段飞行算不算「一投」（鼠标戳飞的不算）
 
         # 落地挤压
         self._squash_t0 = -99.0
@@ -611,23 +610,21 @@ class PetWindow(QWidget):
 
     # ---------- 抛掷 ----------
 
-    def _start_throw(self, vx: float, vy: float, *, shot: bool = True) -> None:
+    def _start_throw(self, vx: float, vy: float) -> None:
         """开始一段抛掷飞行。
 
-        :param shot: 是否算「一投」——只有用户甩出去（和宠物互撞）才通知投篮游戏。
-            鼠标戳飞的不算：玩家没瞄筐，计分板不该为它记一投。
+        不管这段飞行是**用户甩出去的**、**鼠标撞飞的**还是**被别的宠物撞飞的**，
+        都算「一投」：只要它飞进筐就该计分（鼠标撞进去也是玩家一手造成的）。
         """
         self._sync_area()
         self.state = "throw"
         self._throw = physics.ThrowState(float(self.x()), float(self.y()), vx, vy)
         self._throw_last = time.monotonic()
-        self._throw_shot = shot
-        if shot and self.on_shot_start is not None:
+        if self.on_shot_start is not None:
             self.on_shot_start()
 
     def _end_shot(self) -> None:
         """这一投到此为止（被抓住 / 被第三方占用），游戏那边要把「飞行中」的锁放掉。"""
-        self._throw_shot = False
         if self.on_shot_land is not None:
             self.on_shot_land()
 
@@ -638,7 +635,6 @@ class PetWindow(QWidget):
         不调 `_end_shot`——那会把「一投结束」再报给游戏一次，庆祝会播两遍。
         """
         self._throw = None
-        self._throw_shot = False
         self.state = "idle"
         self._play_idle()
 
@@ -678,14 +674,11 @@ class PetWindow(QWidget):
             self.on_throw_step(prev_center, self._body_center(state.x, state.y))
 
         if at_rest:
-            was_shot = self._throw_shot
             self._throw = None
-            self._throw_shot = False
             self.state = "idle"
             self._idle_then("throw")
             # 放在 _idle_then 之后：否则待机的 _play() 会把庆祝动作一口气掐掉
-            if was_shot:
-                self._end_shot()
+            self._end_shot()
 
     def _bounce_off_peers(self, state: physics.ThrowState) -> physics.ThrowState:
         """本帧自己被甩出去时撞到别的宠物 → 改写自己的速度 + 通知对方以新初速飞出去。
@@ -783,9 +776,9 @@ class PetWindow(QWidget):
 
         if now - self._poke_t0 < MOUSE_COOLDOWN_SEC:
             return
-        # 被拎着 / 已经在飞 / 鼠标正按着（点击、拖动都是用户主动操作，别抢）
-        # 投篮游戏开着（game_lock）也不弹：那会儿必须用鼠标抓它，蹭一下就飞走就没法玩了
-        if self.state in ("drag", "throw") or self.game_lock or not self.isVisible():
+        # 被拎着 / 已经在飞 / 不可见就不弹
+        # 投篮游戏**不排除**：球局里也能撞飞，撞进筐照样计分
+        if self.state in ("drag", "throw") or not self.isVisible():
             return
         if QGuiApplication.mouseButtons() != Qt.NoButton:
             return
@@ -798,7 +791,8 @@ class PetWindow(QWidget):
         if push is None:
             return
         self._poke_t0 = now
-        self._start_throw(push[0], push[1], shot=False)
+        # 算「一投」：撞进筐也要计分（玩家用鼠标把它撞进去，凭什么是白撞）
+        self._start_throw(push[0], push[1])
         print(f"[pet] 被鼠标弹开 → ({push[0]:.0f},{push[1]:.0f})", flush=True)
 
     # ---------- 菜单 / 外部控制 ----------

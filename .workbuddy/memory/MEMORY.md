@@ -15,6 +15,16 @@ PySide6 桌宠（零 Electron / 零 Node），重构自 PC2005-cloud/dsh-pet。�
 `run-pet.cmd` 是**唯一批处理**：自检 .venv / python 可用 / 四个依赖（PySide6/av/numpy/zstandard）缺哪个报哪个。
 其余一律 python：`build.py`（只编译）、`make_pet_webm.py`（`video/src` → `assets/webm`）、`session.py --all`、`balance.py`。
 
+## 提交：本仓库不打 tag（2026-11-13 定）
+
+渔夫明确说过「这个项目不用打 tag」，历史 tag 已全删（本地 + 远程）。以后提交：
+
+```
+ci.sh -m "fix: xxx"      # 不带位置参数 → TAGS 为空 → 只 add/commit/pull/push，不打 tag
+```
+
+**别**再用 `ci.sh dsh-pet -m "..."` 那种带 tag 名的写法（那是别的项目的习惯）。
+
 ## 素材链抠像（2026-10-28 收紧）
 
 上游 `chroma_step02.py` 是「色相 70~170 + sat≥0.15」，照抄留灰边 + 水印位灰白点。`key_frame` 两处改动：
@@ -61,8 +71,10 @@ Qt 只把落在窗口上的鼠标事件送进来，窗口外扫过来收不到 �
   2026-11-13 定稿成「速度门槛 + 可配」，别再来回改。）
 - 不参与的情况：`state in ("drag","throw")`、`QGuiApplication.mouseButtons() != NoButton`
   （点击/拖动都是主动操作，不能抢）、不可见、同一只 300ms 冷却。
-- `_start_throw(vx, vy, shot=False)`：鼠标弹飞**不算一投**，不调 `on_shot_start`，
-  落地也不调 `_end_shot`（否则投篮游戏会给它记分/回位）。`_throw_shot` 记住这一段是不是真甩出。
+  **`game_lock` 不排除**（2026-11-13 改）：球局里照样能撞飞，撞进筐同样计分。
+- `_start_throw(vx, vy)`：**没有 shot 参数了**（2026-11-13 删）。甩出 / 鼠标撞飞 / 宠物互撞
+  一律算「一投」，都调 `on_shot_start`；落地一律 `_end_shot`。`_throw_shot` 字段已废弃删除。
+  （历史：原本鼠标撞飞 `shot=False` 不计分，渔夫要求撞进筐也要计分才统一。）
 - 运行期开关：`window.set_mouse_collision(on)` 起停 timer；菜单勾选走 `PetApp.set_mouse_collision`
  （**全局**，只改内存 `cfg.physics.mouse_collision`，不写文件）；`reload_config` 按文件值复位。
 
