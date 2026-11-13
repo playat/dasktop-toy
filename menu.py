@@ -23,6 +23,7 @@
          └ 动画目录…
     大小 ┬ 大 / 中 / 小 / 迷你
     固定原地（勾选）
+    鼠标碰到就弹开（勾选）                ← physics.mouseCollision，随时可关
     投篮游戏                              ← main 注入（`game_action`），开局后变「结束投篮游戏（N 分）」
     回到初始位置
     重载配置
@@ -156,6 +157,8 @@ def build_menu(
     on_home: Callable[[], None],
     on_reload: Callable[[], None],
     on_quit: Callable[[], None],
+    mouse_collide: bool = False,
+    on_mouse_collide: Callable[[bool], None] | None = None,
     quit_text: str = "退出",
     on_quit_all: Callable[[], None] | None = None,
     quit_all_text: str = "",
@@ -199,6 +202,15 @@ def build_menu(
     fixed_act.setChecked(fixed)
     fixed_act.triggered.connect(lambda checked: on_fixed(checked))
     menu.addAction(fixed_act)
+
+    # ---- 鼠标碰撞（配置 physics.mouseCollision，可在菜单里随时开关）----
+    if on_mouse_collide is not None:
+        poke_act = QAction("鼠标碰到就弹开", menu)
+        poke_act.setCheckable(True)
+        poke_act.setChecked(mouse_collide)
+        poke_act.setToolTip("开启后用手扫过宠物，它会按你扫的方向被弹飞（再点一下取消）")
+        poke_act.triggered.connect(lambda checked: on_mouse_collide(checked))
+        menu.addAction(poke_act)
 
     # ---- 投篮游戏（开局 / 结束同一项，文案由调用方决定，带当前分数）----
     if game_action is not None:

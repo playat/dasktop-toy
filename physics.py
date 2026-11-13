@@ -88,6 +88,78 @@ def collide_pet(
     )
 
 
+# ---- 鼠标戳（physics.mouseCollision） ----
+# 鼠标当成一个半径 MOUSE_RADIUS 的小球，**撞得快**才把宠物弹开。
+# 慢慢移过去（<= MOUSE_MIN_SPEED）一律不弹 —— 那是想点它、想右键，不是戳它；
+# 手停在身上更不会弹（否则宠物会贴着手心一直抖）。
+MOUSE_RADIUS = 10.0
+# 触发门槛（px/s）：低于这个速度算「只是移过去」。人慢慢挪鼠标 100~500，
+# 正常滑 700~1200，用力甩 2000+。嫌太灵敏就把 config 的 mouseMinSpeed 调大。
+MOUSE_MIN_SPEED = 800.0
+MOUSE_PUSH_GAIN = 1.25       # 速度传递系数：手扫多快，宠物飞多快
+MOUSE_PUSH_MIN = 260.0       # 慢悠悠蹭过来也得弹一下，不然像没反应
+MOUSE_PUSH_MAX = 2800.0      # 别一挥手把宠物甩出银河系
+MOUSE_SWIPE_WEIGHT = 0.7     # 方向：0.7 跟手的扫向 + 0.3 离心方向
+MOUSE_UP_BIAS = 0.45         # 再往上抬一点，落下来才有 Q 弹
+
+
+def cursor_touching(
+    body: tuple[float, float, float, float],
+    cursor: tuple[float, float],
+    radius: float = MOUSE_RADIUS,
+) -> bool:
+    """鼠标（半径 radius 的小球）是否压在身体框上。"""
+    mx, my = cursor
+    left, top, right, bottom = body
+    return left - radius <= mx <= right + radius and top - radius <= my <= bottom + radius
+
+
+def cursor_push(
+    body: tuple[float, float, float, float],
+    cursor: tuple[float, float],
+    cursor_v: tuple[float, float],
+    *,
+    radius: float = MOUSE_RADIUS,
+    min_speed: float = MOUSE_MIN_SPEED,
+) -> tuple[float, float] | None:
+    """鼠标撞到身体框 → 返回把宠物弹开的初速度 (vx, vy)；不该弹返回 None。
+
+    :param body: 身体包围盒（全局坐标）(left, top, right, bottom)。
+    :param cursor: 鼠标位置（全局坐标）。
+    :param cursor_v: 鼠标速度 px/s，屏幕坐标系（y 向下为正）。
+    :param min_speed: 触发门槛 px/s。低于它 = 只是把鼠标移过去，不弹。
+        只认速度、不认「刚进入」：手贴在身上再猛地一甩，照样算撞。
+    """
+    if not cursor_touching(body, cursor, radius):
+        return None
+
+    vx, vy = cursor_v
+    speed = math.hypot(vx, vy)
+    if speed < min_speed:  # 慢慢移过去 / 手停着：不弹
+        return None
+
+    # 方向 = 扫动方向（主要）+ 离心方向（兜底，鼠标斜着插进来时也不会推歪）
+    mx, my = cursor
+    left, top, right, bottom = body
+    cx, cy = (left + right) / 2.0, (top + bottom) / 2.0
+    rx, ry = cx - mx, cy - my
+    rd = math.hypot(rx, ry)
+    if rd < 1e-6:  # 正好点在中心：没有离心方向，就按扫动方向走
+        rx = ry = 0.0
+    else:
+        rx, ry = rx / rd, ry / rd
+    dx = MOUSE_SWIPE_WEIGHT * vx / speed + (1.0 - MOUSE_SWIPE_WEIGHT) * rx
+    dy = MOUSE_SWIPE_WEIGHT * vy / speed + (1.0 - MOUSE_SWIPE_WEIGHT) * ry
+    dy -= MOUSE_UP_BIAS
+    d = math.hypot(dx, dy)
+    if d < 1e-6:
+        dx, dy, d = 0.0, -1.0, 1.0
+    dx, dy = dx / d, dy / d
+
+    push = min(MOUSE_PUSH_MAX, max(MOUSE_PUSH_MIN, speed * MOUSE_PUSH_GAIN))
+    return dx * push, dy * push
+
+
 # ---- 落地 Q 弹 ----
 # 皮球式：短促、克制的压扁，回弹略有过冲，宽度几乎不动。
 # 原值 0.55（压到 45%）配 35% 的横向耦合，是把角色压成"饼"的主因。
@@ -112,6 +184,8 @@ class PhysicsParams:
     ceiling_bounce: bool = True
     throw_power: float = 1.0
     pet_collision: bool = False
+    mouse_collision: bool = False  # 鼠标戳到宠物就把它弹开（菜单里可随时开关）
+    mouse_min_speed: float = MOUSE_MIN_SPEED  # 撞多快才算「撞」（px/s）
 
     @classmethod
     def from_dict(cls, raw: dict) -> "PhysicsParams":
@@ -122,6 +196,10 @@ class PhysicsParams:
             ceiling_bounce=bool(raw.get("ceilingBounce", True)),
             throw_power=float(raw.get("throwPower", 1.0)),
             pet_collision=bool(raw.get("petCollision", False)),
+            mouse_collision=bool(raw.get("mouseCollision", False)),
+            mouse_min_speed=min(
+                5000.0, max(50.0, float(raw.get("mouseMinSpeed", MOUSE_MIN_SPEED)))
+            ),
         )
 
 

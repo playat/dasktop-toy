@@ -46,6 +46,11 @@ SQ_DURATION_SEC = physics.SQ_DURATION_MS / 1000.0
 DRAG_THRESHOLD = 5
 TRAIL_MAX = 64
 
+# 鼠标碰撞：轮询间隔与冷却。冷却保证「扫过去」只弹一下，不会在同一段轨迹里
+# 每帧都重新加速（那样一甩就是天外飞仙）。
+MOUSE_POLL_MS = 16
+MOUSE_COOLDOWN_SEC = 0.30
+
 
 class PetWindow(QWidget):
     TICK_MS = 15
@@ -95,6 +100,7 @@ class PetWindow(QWidget):
         # 抛掷
         self._throw: physics.ThrowState | None = None
         self._throw_last = 0.0
+        self._throw_shot = False  # 这一段飞行算不算「一投」（鼠标戳飞的不算）
 
         # 落地挤压
         self._squash_t0 = -99.0
@@ -152,6 +158,17 @@ class PetWindow(QWidget):
         self._idle_guard = QTimer(self)
         self._idle_guard.setSingleShot(True)
         self._idle_guard.timeout.connect(self._guard_idle)
+
+        # 鼠标碰撞（physics.mouseCollision）：Qt 只给「落在本窗口上」的鼠标事件，
+        # 窗口外的手扫过来是收不到的 → 全局轮询 QCursor.pos() 自己算速度。
+        self._mouse_on = False
+        self._mouse_last: tuple[float, QPoint] | None = None
+        self._mouse_v = (0.0, 0.0)
+        self._poke_t0 = -99.0
+        self._mouse_timer = QTimer(self)
+        self._mouse_timer.setInterval(MOUSE_POLL_MS)
+        self._mouse_timer.timeout.connect(self._poke_mouse)
+        self.set_mouse_collision(cfg.physics.mouse_collision)
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         """跨 DPI 换屏时把尺寸钉死回 `self._want`。
@@ -594,16 +611,23 @@ class PetWindow(QWidget):
 
     # ---------- 抛掷 ----------
 
-    def _start_throw(self, vx: float, vy: float) -> None:
+    def _start_throw(self, vx: float, vy: float, *, shot: bool = True) -> None:
+        """开始一段抛掷飞行。
+
+        :param shot: 是否算「一投」——只有用户甩出去（和宠物互撞）才通知投篮游戏。
+            鼠标戳飞的不算：玩家没瞄筐，计分板不该为它记一投。
+        """
         self._sync_area()
         self.state = "throw"
         self._throw = physics.ThrowState(float(self.x()), float(self.y()), vx, vy)
         self._throw_last = time.monotonic()
-        if self.on_shot_start is not None:
+        self._throw_shot = shot
+        if shot and self.on_shot_start is not None:
             self.on_shot_start()
 
     def _end_shot(self) -> None:
         """这一投到此为止（被抓住 / 被第三方占用），游戏那边要把「飞行中」的锁放掉。"""
+        self._throw_shot = False
         if self.on_shot_land is not None:
             self.on_shot_land()
 
@@ -614,6 +638,7 @@ class PetWindow(QWidget):
         不调 `_end_shot`——那会把「一投结束」再报给游戏一次，庆祝会播两遍。
         """
         self._throw = None
+        self._throw_shot = False
         self.state = "idle"
         self._play_idle()
 
@@ -653,11 +678,14 @@ class PetWindow(QWidget):
             self.on_throw_step(prev_center, self._body_center(state.x, state.y))
 
         if at_rest:
+            was_shot = self._throw_shot
             self._throw = None
+            self._throw_shot = False
             self.state = "idle"
             self._idle_then("throw")
             # 放在 _idle_then 之后：否则待机的 _play() 会把庆祝动作一口气掐掉
-            self._end_shot()
+            if was_shot:
+                self._end_shot()
 
     def _bounce_off_peers(self, state: physics.ThrowState) -> physics.ThrowState:
         """本帧自己被甩出去时撞到别的宠物 → 改写自己的速度 + 通知对方以新初速飞出去。
@@ -711,6 +739,67 @@ class PetWindow(QWidget):
         """被别的宠物撞到：停掉当前动作，从落点以新初速飞出去（复用同一套抛掷物理）。"""
         self._stop_move()
         self._start_throw(vx, vy)
+
+    # ---------- 鼠标碰撞（physics.mouseCollision） ----------
+
+    @property
+    def mouse_collision(self) -> bool:
+        return self._mouse_on
+
+    def set_mouse_collision(self, on: bool) -> None:
+        """开关「鼠标碰到就弹开」。运行中随时可切，不需要重启（菜单里那个勾）。"""
+        self._mouse_on = bool(on)
+        self._mouse_last = None  # 重新开始采样，免得拿一分钟前的坐标算出天文数字速度
+        self._mouse_v = (0.0, 0.0)
+        if self._mouse_on:
+            if not self._mouse_timer.isActive():
+                self._mouse_timer.start(MOUSE_POLL_MS)
+        else:
+            self._mouse_timer.stop()
+
+    def _poke_mouse(self) -> None:
+        """轮询鼠标：手**撞**到身体上（够快）就把自己按「手扫动的方向」弹出去。
+
+        Qt 只把落在本窗口上的鼠标事件送进来，窗口外扫过来收不到，所以这里自己采
+        `QCursor.pos()` 算速度。判据在 physics.cursor_push（纯函数，可单测）。
+
+        只认**速度**：慢慢把鼠标移过去一律不弹（那是想点它 / 右键它），
+        门槛见 config 的 physics.mouseMinSpeed（默认 800px/s）。
+        """
+        if not self._mouse_on:
+            self._mouse_timer.stop()
+            return
+
+        now = time.monotonic()
+        pos = QCursor.pos()
+        last, self._mouse_last = self._mouse_last, (now, pos)
+        if last is not None:
+            dt = now - last[0]
+            if 1e-4 < dt <= 0.5:  # 超过 0.5s 说明中间卡过，这一下速度不可信，丢掉
+                self._mouse_v = (
+                    (pos.x() - last[1].x()) / dt,
+                    (pos.y() - last[1].y()) / dt,
+                )
+
+        if now - self._poke_t0 < MOUSE_COOLDOWN_SEC:
+            return
+        # 被拎着 / 已经在飞 / 鼠标正按着（点击、拖动都是用户主动操作，别抢）
+        # 投篮游戏开着（game_lock）也不弹：那会儿必须用鼠标抓它，蹭一下就飞走就没法玩了
+        if self.state in ("drag", "throw") or self.game_lock or not self.isVisible():
+            return
+        if QGuiApplication.mouseButtons() != Qt.NoButton:
+            return
+
+        body = self.body_box()
+        point = (float(pos.x()), float(pos.y()))
+        push = physics.cursor_push(
+            body, point, self._mouse_v, min_speed=self._phys.mouse_min_speed
+        )
+        if push is None:
+            return
+        self._poke_t0 = now
+        self._start_throw(push[0], push[1], shot=False)
+        print(f"[pet] 被鼠标弹开 → ({push[0]:.0f},{push[1]:.0f})", flush=True)
 
     # ---------- 菜单 / 外部控制 ----------
 
@@ -787,6 +876,7 @@ class PetWindow(QWidget):
         self._cfg = cfg
         self._phys = cfg.physics
         self._anims = anims
+        self.set_mouse_collision(self._phys.mouse_collision)  # 配置文件改了就按新的来
         self._player.stop()
         self._gap_timer.stop()
         self._cur = self._prev = self._last_drawn = None
@@ -796,6 +886,7 @@ class PetWindow(QWidget):
     def shutdown(self) -> None:
         self._timer.stop()
         self._gap_timer.stop()
+        self._mouse_timer.stop()
         self._player.stop()
         if self.bubble is not None:
             self.bubble.clear()

@@ -45,7 +45,16 @@
     "groundFriction": 2.5,
     "ceilingBounce": true,
     "throwPower": 1.0,
-    "petCollision": true
+    "petCollision": true,
+    // 鼠标碰撞：true = 鼠标**撞**到宠物就把它弹开（快速扫过去 / 甩过去）。
+    // 慢慢把鼠标移过去**不弹**（那是想点它、右键它），门槛由下面的 mouseMinSpeed 定。
+    // 手停在它身上、拖着 / 正在飞 / 按着鼠标键 / 打篮球时也都不触发。
+    // 运行中可以在右键菜单「鼠标碰到就弹开」里随时开关，不必改文件。
+    "mouseCollision": true,
+    // 触发门槛（px/s）：鼠标速度低于它算「只是移过去」，不弹。
+    //   慢慢挪 100~500 · 正常滑动 700~1200 · 用力甩 2000+
+    // 嫌太灵敏就调大（例如 1500），嫌撞不动就调小（例如 400）。
+    "mouseMinSpeed": 800
   },
   // ===================== 默认宠物列表（多开） =====================
   // 写几条就开几只。每只独立：
@@ -61,7 +70,7 @@
     {
       "name": "蓝毛小女仆",
       "id": "main",
-      "size": 462,
+      "size": 320,
       "fixedEnabled": false,
       "position": {
         "corner": "bottom-right",

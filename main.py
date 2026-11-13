@@ -325,6 +325,8 @@ class PetApp:
             on_fixed=win.set_fixed,
             on_home=win.reset_home,
             on_reload=self.reload,
+            mouse_collide=self.cfg.physics.mouse_collision,
+            on_mouse_collide=self.set_mouse_collision,
             on_quit=self.quit if solo else (lambda: self.close_pet(win)),
             quit_text="退出" if solo else "关掉这只",
             on_quit_all=self.quit,
@@ -334,6 +336,20 @@ class PetApp:
             game_action=game_act,
         )
         menu.exec(global_pos)
+
+    # ---------- 鼠标碰撞 ----------
+
+    def set_mouse_collision(self, on: bool) -> None:
+        """菜单勾选「鼠标碰到就弹开」：所有宠物一起切。
+
+        这是**运行期偏好**：只改内存里这份配置，不写回 config.jsonc。
+        下次启动 / 点「重载配置」都会按文件里的 `physics.mouseCollision` 复位。
+        """
+        on = bool(on)
+        self.cfg.physics.mouse_collision = on
+        for win in self.windows:
+            win.set_mouse_collision(on)
+        print(f"[pet] 鼠标碰撞 {'开' if on else '关'}", flush=True)
 
     # ---------- 投篮游戏 ----------
 

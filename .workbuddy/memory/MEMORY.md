@@ -48,6 +48,24 @@ PySide6 桌宠（零 Electron / 零 Node），重构自 PC2005-cloud/dsh-pet。�
   另有 `_idle_guard`（3s 单次）兜底：`_hold_idle()` 末尾启动、`_schedule_next()`/`_play()`/`_start_move()`
   一有正经动作就 stop，只在「state==idle 且 gap 没排上」时补排一次。
 
+## 鼠标碰撞（`physics.mouseCollision`）
+
+Qt 只把落在窗口上的鼠标事件送进来，窗口外扫过来收不到 → 每只宠物一个 16ms `QTimer` 轮询
+`QCursor.pos()` 自己算速度（实测主屏 1.5 / 副屏 1.25 下光标与窗口几何是**同一套逻辑坐标**，偏差 0）。
+
+- 判据全在 `physics.cursor_push(body, cursor, v, min_speed=)`（纯函数）：鼠标当半径 10 的小球。
+  **只认速度门槛**（`physics.mouseMinSpeed`，默认 800px/s）：慢慢移过去不弹（那是想点它/右键它），
+  够快才弹，力度 `clamp(speed×1.25, 260, 2800)`。**没有「进入沿」判据**——手贴在身上再猛甩照样算撞。
+  方向 = 0.7 扫向 + 0.3 离心 + 0.45 上抬。位置命中用 `body_box`（不是窗口矩形，透明边不算）。
+  （历史：先按 200px/s 门槛做 → 用户说慢速也该弹 → 改成进入沿触发 → 用户又说慢慢移也弹，
+  2026-11-13 定稿成「速度门槛 + 可配」，别再来回改。）
+- 不参与的情况：`state in ("drag","throw")`、`QGuiApplication.mouseButtons() != NoButton`
+  （点击/拖动都是主动操作，不能抢）、不可见、同一只 300ms 冷却。
+- `_start_throw(vx, vy, shot=False)`：鼠标弹飞**不算一投**，不调 `on_shot_start`，
+  落地也不调 `_end_shot`（否则投篮游戏会给它记分/回位）。`_throw_shot` 记住这一段是不是真甩出。
+- 运行期开关：`window.set_mouse_collision(on)` 起停 timer；菜单勾选走 `PetApp.set_mouse_collision`
+ （**全局**，只改内存 `cfg.physics.mouse_collision`，不写文件）；`reload_config` 按文件值复位。
+
 ## 对话输入框（`saybox.py`）
 
 「说句话…」不再 `QInputDialog`，改成宠物**右侧**的自绘输入条（白底圆角 + 左/右侧小尾巴，投影+描边）。
